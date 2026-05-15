@@ -325,7 +325,13 @@ const _normToUid      = new Map<string, string>();
 const _groupNameToUid = new Map<string, Map<string, string>>();
 
 function _normName(name: string): string {
-  return name.toLowerCase().trim().replace(/\s+/g, ' ');
+  return name
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{Mn}/gu, '')
+    .replace(/đ/g, 'd')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 // ── Persistence helpers ───────────────────────────────────────────────────────

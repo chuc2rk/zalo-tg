@@ -225,6 +225,12 @@ async function resolveUserDisplayName(api: ZaloAPI, uid: string | undefined, fal
   const cleanUid = uid?.trim();
   if (!cleanUid) return fallback;
 
+  const friend = friendsCache.get(cleanUid);
+  const contactName = friend?.alias?.trim()
+    || friend?.displayName?.trim()
+    || aliasCache.get(cleanUid)?.trim();
+  if (contactName) return contactName;
+
   const cached = userCache.getName(cleanUid);
   if (cached?.trim()) return cached;
 
@@ -467,12 +473,19 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
     }
 
     let friendCount = 0;
-    const friends = await api.getAllFriends() as Array<{ userId: string; displayName: string }>;
+    const friends = await api.getAllFriends() as Array<{
+      userId: string;
+      displayName?: string;
+      zaloName?: string;
+      username?: string;
+    }>;
     if (Array.isArray(friends) && friends.length) {
       friendsCache.set(friends.map(f => ({
         userId:      f.userId,
-        displayName: f.displayName,
-        alias:       aliasCache.get(f.userId),
+        // zca-js User.displayName is the logged-in account's address-book label.
+        // zaloName is the public profile name. Do NOT overwrite displayName with
+        // getAliasList-only aliases, or we lose saved contact names such as "Tỷ cưng".
+        displayName: (f.displayName || f.zaloName || f.username || f.userId).trim(),
       })));
       friendCount = friends.length;
     }
@@ -517,7 +530,9 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
 
       const zaloId     = msg.threadId;
       const type       = msg.type as 0 | 1;
-      const senderName = msg.data.dName ?? msg.data.uidFrom;
+      const ownUid     = typeof api.getOwnId === 'function' ? String(api.getOwnId()) : undefined;
+      const senderUid  = msg.isSelf && ownUid ? ownUid : msg.data.uidFrom;
+      const senderName = msg.isSelf ? 'Chuc' : (msg.data.dName ?? msg.data.uidFrom);
       const msgType    = msg.data.msgType ?? ZALO_MSG_TYPES.TEXT;
 
       if (type === ThreadType.Group && await isMutedZaloGroup(api, zaloId)) {
@@ -533,9 +548,9 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
 
       // Keep userCache up-to-date so TG→Zalo mention resolution works
       if (type === ThreadType.Group) {
-        userCache.saveForGroup(msg.data.uidFrom, senderName, zaloId);
+        userCache.saveForGroup(senderUid, senderName, zaloId);
       } else {
-        userCache.save(msg.data.uidFrom, senderName);
+        userCache.save(senderUid, senderName);
       }
 
       // Parse content early so we can start media download in parallel with topic resolution
@@ -565,7 +580,7 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
       //     contact-book name in message captions/headers when available.
       //   - DM: use the PEER's contact-book name (zaloId = peer UID), not the raw sender dName.
       let displayName = senderName;
-      let bridgeSenderName = aliasCache.get(msg.data.uidFrom) ?? senderName;
+      let bridgeSenderName = msg.isSelf ? senderName : await resolveUserDisplayName(api, senderUid, senderName);
       let groupAvatarUrl: string | undefined;
       if (type === ThreadType.Group) {
         const info = await getCachedGroupInfo(api, zaloId);
@@ -575,7 +590,7 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         // For DMs, zaloId is the peer's UID — resolve their real name then apply alias/contact name.
         // Use the same contact-book name both for the topic and the message caption/header.
         const realName = await resolveUserDisplayName(api, zaloId, senderName);
-        displayName = aliasCache.get(zaloId) ?? realName;
+        displayName = realName;
         bridgeSenderName = displayName;
       }
 
@@ -630,7 +645,7 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
       const zaloQuoteData: ZaloQuoteData = {
         msgId:    msg.data.msgId,
         cliMsgId: msg.data.cliMsgId ?? '',
-        uidFrom:  msg.data.uidFrom,
+        uidFrom:  senderUid,
         ts:       msg.data.ts,
         msgType:  msgType,
         // For text messages (content is a plain string), keep it as-is so zca-js
@@ -714,7 +729,7 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         const photoCaption = media.title?.trim() || undefined;
 
         const childnumber: number = (media as { childnumber?: number }).childnumber ?? 0;
-        const albumKey = `${zaloId}:${msg.data.uidFrom}`;
+        const albumKey = `${zaloId}:${senderUid}`;
 
         // If childnumber > 0 OR there's already a buffer for this key → album mode
         const hasBuffer = (typeof zaloAlbumStore as unknown as { _has?: (k: string) => boolean })._has?.(albumKey);
