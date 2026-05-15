@@ -587,11 +587,13 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         displayName = info.name || senderName;
         groupAvatarUrl = info.avt;
       } else {
-        // For DMs, zaloId is the peer's UID — resolve their real name then apply alias/contact name.
-        // Use the same contact-book name both for the topic and the message caption/header.
-        const realName = await resolveUserDisplayName(api, zaloId, senderName);
-        displayName = realName;
-        bridgeSenderName = displayName;
+        // For DMs, zaloId is the peer's UID, so use it for the topic name.
+        // But the message header/caption must remain the actual sender. For
+        // self-sent messages from the Zalo app, labeling the bridged TG message
+        // as the peer is wrong.
+        const peerName = await resolveUserDisplayName(api, zaloId, senderName);
+        displayName = peerName;
+        if (!msg.isSelf) bridgeSenderName = peerName;
       }
 
       const topicId = await getOrCreateTopic(zaloId, type, displayName, groupAvatarUrl);
