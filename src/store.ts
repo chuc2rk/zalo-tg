@@ -694,6 +694,10 @@ export const reactionSummaryStore = {
     return entry;
   },
 
+  get(tgMsgId: number): ReactionSummaryEntry | undefined {
+    return _reactionSummaries.get(tgMsgId);
+  },
+
   setSummaryMsgId(tgMsgId: number, summaryMsgId: number): void {
     const entry = _reactionSummaries.get(tgMsgId);
     if (entry) entry.summaryTgMsgId = summaryMsgId;

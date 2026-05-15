@@ -7,7 +7,7 @@ import { promisify } from 'util';
 const execFileAsync = promisify(execFile);
 
 import type { ZaloAPI } from '../zalo/types.js';
-import { store, msgStore, userCache, friendsCache, groupsCache, sentMsgStore, pollStore, mediaGroupStore, reactionEchoStore, aliasCache } from '../store.js';
+import { store, msgStore, userCache, friendsCache, groupsCache, sentMsgStore, pollStore, mediaGroupStore, reactionEchoStore, reactionSummaryStore, aliasCache } from '../store.js';
 import { tgBot } from './bot.js';
 import { config } from '../config.js';
 import { downloadToTemp, cleanTemp, convertToM4a, extractVideoThumbnail, convertWebmToGif } from '../utils/media.js';
@@ -1445,6 +1445,32 @@ export function setupTelegramHandler(
         reactionEchoStore.cancel(quote.zaloId, quote.msgId, zaloIcon);
         throw err;
       }
+
+      // The Zalo echo of this TG reaction is intentionally suppressed above, so
+      // update any existing Zalo→TG reaction summary locally to keep the line
+      // consistent with the visible Telegram native reaction. Editing a Telegram
+      // message does not emit message_reaction, so this does not recurse.
+      const summary = reactionSummaryStore.get(tgMsgId);
+      if (summary?.summaryTgMsgId !== null && summary?.summaryTgMsgId !== undefined) {
+        try {
+          const actorName = [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(' ') || ctx.from?.username || 'Telegram';
+          reactionSummaryStore.upsert(tgMsgId, tgEmoji, actorName);
+          const text = reactionSummaryStore.buildText(summary, escapeHtml);
+          if (text && text !== summary.lastSentText) {
+            await ctx.telegram.editMessageText(
+              config.telegram.groupId,
+              summary.summaryTgMsgId,
+              undefined,
+              text,
+              { parse_mode: 'HTML' },
+            );
+            summary.lastSentText = text;
+          }
+        } catch (summaryErr) {
+          console.warn('[TG→Zalo] Reaction summary local update failed:', summaryErr);
+        }
+      }
+
       console.log(`[TG→Zalo] Reaction "${tgEmoji}" → Zalo "${zaloIcon}" on msg ${quote.msgId}`);
     } catch (err) {
       console.error('[TG→Zalo] Reaction error:', err);
