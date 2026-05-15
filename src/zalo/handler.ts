@@ -1530,18 +1530,15 @@ ${escapeHtml(photoCaption)}`
       const rIcon: string = data?.content?.rIcon ?? '';
       const emoji = REACTION_EMOJI[rIcon] ?? rIcon;
 
-      // If empty reaction icon → user removed reaction; skip notification
-      if (!rIcon) return;
-
       const gMsgIds: Array<{ gMsgID?: string | number }> = data?.content?.rMsg ?? [];
       const zaloMsgId = String(gMsgIds[0]?.gMsgID ?? '');
       if (!zaloMsgId) return;
 
-      const zaloId = String(reaction?.threadId ?? data?.idTo ?? "");
+      const zaloId = String(reaction?.threadId ?? data?.idTo ?? '');
       if (!zaloId) return;
 
-      if (reaction?.isSelf && reactionEchoStore.consume(zaloId, zaloMsgId, rIcon)) {
-        console.log("[ZaloHandler] Reaction: skip bridge echo for " + zaloId + "/" + zaloMsgId + "/" + rIcon);
+      if (rIcon && reaction?.isSelf && reactionEchoStore.consume(zaloId, zaloMsgId, rIcon)) {
+        console.log(`[ZaloHandler] Reaction: skip bridge echo for ${zaloId}/${zaloMsgId}/${rIcon}`);
         return;
       }
 
@@ -1551,27 +1548,32 @@ ${escapeHtml(photoCaption)}`
         return;
       }
 
-      const type   = (reaction?.isGroup ? 1 : 0) as 0 | 1;
+      const type    = (reaction?.isGroup ? 1 : 0) as 0 | 1;
       const topicId = store.getTopicByZalo(zaloId, type);
       if (topicId === undefined) return;
 
-      const rawName = typeof data?.dName === 'string' ? data.dName.trim() : '';
+      const rawName  = typeof data?.dName === 'string' ? data.dName.trim() : '';
       const actorUid = typeof data?.uidFrom === 'string' ? data.uidFrom : undefined;
-      const actorName = rawName || await resolveUserDisplayName(api, actorUid, 'ai đó');
+      const actorName = await resolveUserDisplayName(api, actorUid, rawName || 'ai đó');
 
-      // Aggregate reactions: update the summary entry then debounce send/edit
-      const entry = reactionSummaryStore.upsert(tgMsgId, emoji, actorName);
+      // Aggregate reactions: update the summary entry then debounce send/edit.
+      // Empty rIcon means the actor removed their reaction, so update the existing
+      // summary instead of posting a separate "removed reaction" notification.
+      const entry = rIcon
+        ? reactionSummaryStore.upsert(tgMsgId, emoji, actorName)
+        : reactionSummaryStore.remove(tgMsgId, actorName);
+      if (!entry) return;
 
       if (entry.debounceTimer) clearTimeout(entry.debounceTimer);
       entry.debounceTimer = setTimeout(async () => {
         entry.debounceTimer = null;
-        const text = reactionSummaryStore.buildText(entry);
-        if (!text) return;
-        // Skip if text hasn't changed (same person reacting fires multiple events)
+        const text = reactionSummaryStore.buildText(entry, escapeHtml);
+        // Skip if text hasn't changed (same person reacting fires duplicate events).
         if (text === entry.lastSentText) return;
         try {
           if (entry.summaryTgMsgId === null) {
-            // First reaction: send a new reply message
+            if (!text) return;
+            // First reaction: send a new reply message.
             const sent = await tg.sendMessage(
               config.telegram.groupId,
               text,
@@ -1583,8 +1585,8 @@ ${escapeHtml(photoCaption)}`
             );
             reactionSummaryStore.setSummaryMsgId(tgMsgId, sent.message_id);
             entry.lastSentText = text;
-          } else {
-            // Subsequent reactions: edit the existing summary message
+          } else if (text) {
+            // Subsequent reactions: edit the existing summary message.
             await tg.editMessageText(
               config.telegram.groupId,
               entry.summaryTgMsgId,
@@ -1593,6 +1595,18 @@ ${escapeHtml(photoCaption)}`
               { parse_mode: 'HTML' },
             );
             entry.lastSentText = text;
+          } else {
+            // Telegram cannot edit a message to empty text. Keep a compact marker
+            // when all reactions were removed, then future reactions will edit it.
+            const removedText = 'Đã gỡ reaction';
+            await tg.editMessageText(
+              config.telegram.groupId,
+              entry.summaryTgMsgId,
+              undefined,
+              removedText,
+              { parse_mode: 'HTML' },
+            );
+            entry.lastSentText = removedText;
           }
         } catch (editErr) {
           const msg = editErr instanceof Error ? editErr.message : String(editErr);

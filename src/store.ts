@@ -651,6 +651,11 @@ export interface ReactionSummaryEntry {
 
 const _reactionSummaries = new Map<number, ReactionSummaryEntry>(); // tgMsgId → entry
 
+function cleanReactionActorName(actorName: string): string {
+  const cleaned = actorName.replace(/\s+/g, ' ').trim();
+  return cleaned || 'ai đó';
+}
+
 export const reactionSummaryStore = {
   /** Add or update a reaction. Returns the entry for this tgMsgId. */
   upsert(tgMsgId: number, emoji: string, actorName: string): ReactionSummaryEntry {
@@ -659,9 +664,32 @@ export const reactionSummaryStore = {
       entry = { summaryTgMsgId: null, lastSentText: '', reactions: {}, debounceTimer: null };
       _reactionSummaries.set(tgMsgId, entry);
     }
+
+    const safeName = cleanReactionActorName(actorName);
+
+    // Zalo keeps one active reaction per actor per target message. If the same
+    // actor changes from ❤️ to 👍, move them instead of showing both reactions.
+    for (const [existingEmoji, names] of Object.entries(entry.reactions)) {
+      if (existingEmoji === emoji) continue;
+      const idx = names.indexOf(safeName);
+      if (idx !== -1) names.splice(idx, 1);
+    }
+
     if (!entry.reactions[emoji]) entry.reactions[emoji] = [];
-    if (!entry.reactions[emoji]!.includes(actorName)) {
-      entry.reactions[emoji]!.push(actorName);
+    if (!entry.reactions[emoji]!.includes(safeName)) {
+      entry.reactions[emoji]!.push(safeName);
+    }
+    return entry;
+  },
+
+  remove(tgMsgId: number, actorName: string): ReactionSummaryEntry | null {
+    const entry = _reactionSummaries.get(tgMsgId);
+    if (!entry) return null;
+
+    const safeName = cleanReactionActorName(actorName);
+    for (const names of Object.values(entry.reactions)) {
+      const idx = names.indexOf(safeName);
+      if (idx !== -1) names.splice(idx, 1);
     }
     return entry;
   },
@@ -671,11 +699,11 @@ export const reactionSummaryStore = {
     if (entry) entry.summaryTgMsgId = summaryMsgId;
   },
 
-  buildText(entry: ReactionSummaryEntry): string {
+  buildText(entry: ReactionSummaryEntry, escape: (text: string) => string = (text) => text): string {
     return Object.entries(entry.reactions)
       .filter(([, names]) => names.length > 0)
-      .map(([emoji, names]) => `${emoji} ${names.join(', ')}`)
-      .join('  ');
+      .map(([emoji, names]) => `${escape(emoji)} ${names.map(escape).join(', ')}`)
+      .join('\n');
   },
 };
 
