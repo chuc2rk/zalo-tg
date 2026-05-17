@@ -1649,6 +1649,31 @@ export function setupTelegramHandler(
         reactionEchoStore.cancel(quote.zaloId, quote.msgId, zaloIcon);
         throw err;
       }
+      // The Zalo echo of this TG reaction is intentionally suppressed above, so
+      // update any existing Zalo→TG reaction summary locally to keep the line
+      // consistent with the visible Telegram native reaction. Editing a Telegram
+      // message does not emit message_reaction, so this does not recurse.
+      const summary = reactionSummaryStore.get(tgMsgId);
+      if (summary?.summaryTgMsgId !== null && summary?.summaryTgMsgId !== undefined) {
+        try {
+          const actorName = [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(' ') || ctx.from?.username || 'Telegram';
+          reactionSummaryStore.upsert(tgMsgId, tgEmoji, actorName);
+          const text = reactionSummaryStore.buildText(summary, escapeHtml);
+          if (text && text !== summary.lastSentText) {
+            await ctx.telegram.editMessageText(
+              config.telegram.groupId,
+              summary.summaryTgMsgId,
+              undefined,
+              text,
+              { parse_mode: 'HTML' },
+            );
+            reactionSummaryStore.setLastSentText(tgMsgId, text);
+          }
+        } catch (summaryErr) {
+          console.warn('[TG→Zalo] Reaction summary local update failed:', summaryErr);
+        }
+      }
+
       console.log(`[TG→Zalo] Reaction "${tgEmoji}" → Zalo "${zaloIcon}" on msg ${quote.msgId}`);
     } catch (err) {
       console.error('[TG→Zalo] Reaction error:', err);
@@ -1672,6 +1697,11 @@ export function setupTelegramHandler(
       }
       console.log(`[TG→Zalo] getZaloQuote: found in msgStore for tgMsgId=${tgMsgId} msgId=${fromMsgStore.msgId} cliMsgId=${fromMsgStore.cliMsgId}`);
       return fromMsgStore;
+    }
+    const fromSentStore = sentMsgStore.getQuote(tgMsgId);
+    if (fromSentStore) {
+      console.log(`[TG→Zalo] getZaloQuote: found fallback in sentMsgStore for tgMsgId=${tgMsgId} msgId=${fromSentStore.msgId}`);
+      return fromSentStore;
     }
     console.log(`[TG→Zalo] getZaloQuote: no quote found for tgMsgId=${tgMsgId}`);
     return undefined;
