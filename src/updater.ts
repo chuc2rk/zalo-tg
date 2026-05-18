@@ -1,7 +1,7 @@
 import { execSync } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import type { Telegraf } from 'telegraf';
+import type { Telegraf, Telegram } from 'telegraf';
 
 import { config } from './config.js';
 
@@ -35,34 +35,59 @@ function getChangelog(): string {
   }
 }
 
+function formatUpdateMessage(commit: string): string {
+  const changelog = getChangelog();
+  const lines = changelog
+    ? changelog.split('\n').slice(0, 10).map(l => `• ${l}`).join('\n')
+    : '';
+  return `🔔 <b>Có bản cập nhật mới!</b> (<code>${commit}</code>)\n\n${lines}\n\n` +
+    `⚠️ Branch này có local fixes, nên bot chỉ thông báo. Hãy để Claw review/cherry-pick thay vì auto-pull trực tiếp.`;
+}
+
+async function sendUpdateNotification(tg: Telegram, commit: string): Promise<void> {
+  _notifiedCommit = commit;
+  try {
+    await tg.sendMessage(
+      config.telegram.groupId,
+      formatUpdateMessage(commit),
+      {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [[
+            { text: '👀 Đã xem', callback_data: 'upd:skip' },
+          ]],
+        },
+      },
+    );
+  } catch (err) {
+    console.error('[Updater] Failed to send notification:', err);
+    _notifiedCommit = null;
+  }
+}
+
 export function startUpdateChecker(bot: Telegraf): void {
+  bot.action('upd:skip', async (ctx) => {
+    await ctx.answerCbQuery('Đã ghi nhận').catch(() => undefined);
+    await ctx.deleteMessage().catch(() => undefined);
+  });
 
   // ── Periodic check mỗi 10 phút ───────────────────────────────────────────
   const check = async () => {
     const commit = getNewCommit();
     if (!commit) return;                    // không có gì mới
     if (_notifiedCommit === commit) return; // đã nhắn rồi
-
-    _notifiedCommit = commit;
-    const changelog = getChangelog();
-
-    try {
-      await bot.telegram.sendMessage(
-        config.telegram.groupId,
-        `🔔 <b>Có bản cập nhật mới!</b> (<code>${commit}</code>)\n\n${
-          changelog
-            ? changelog.split('\n').slice(0, 10).map(l => `• ${l}`).join('\n')
-            : ''
-        }`,
-        { parse_mode: 'HTML' },
-      );
-    } catch (err) {
-      console.error('[Updater] Failed to send notification:', err);
-      _notifiedCommit = null;
-    }
+    await sendUpdateNotification(bot.telegram, commit);
   };
 
   // Kiểm tra 1 phút sau khi khởi động, sau đó mỗi 10 phút
   setTimeout(check, 60_000);
   setInterval(check, 10 * 60_000);
+}
+
+/** Manual trigger — safe notify-only /update command. */
+export async function triggerUpdateCheck(tg: Telegram): Promise<boolean> {
+  const commit = getNewCommit();
+  if (!commit) return false;
+  await sendUpdateNotification(tg, commit);
+  return true;
 }

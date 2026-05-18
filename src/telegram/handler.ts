@@ -44,6 +44,7 @@ import { triggerQRLogin } from '../zalo/client.js';
 import { triggerAppLogin } from '../zalo/loginApp.js';
 import { invalidateAppSession, appGetReceivedFriendRequests, appGetSentFriendRequests } from '../zalo/appApi.js';
 import { escapeHtml } from '../utils/format.js';
+import { triggerUpdateCheck } from '../updater.js';
 
 // Bridge start time (module load = process start)
 const _bridgeStartTime = Date.now();
@@ -1046,6 +1047,22 @@ export function setupTelegramHandler(
         },
       },
     );
+  });
+
+  // /update — safe notify-only update check. Does not auto-pull because this branch carries local fixes.
+  tgBot.command('update', async (ctx) => {
+    if (ctx.chat.id !== config.telegram.groupId) return;
+    const replyOpts = ctx.message.message_thread_id
+      ? { message_thread_id: ctx.message.message_thread_id }
+      : {};
+    const found = await triggerUpdateCheck(ctx.telegram);
+    if (!found) {
+      await ctx.telegram.sendMessage(
+        config.telegram.groupId,
+        '✅ Không có bản cập nhật mới từ upstream.',
+        replyOpts,
+      );
+    }
   });
 
   // /status — bridge uptime, topic count, Zalo account
