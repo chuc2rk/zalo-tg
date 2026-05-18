@@ -97,7 +97,10 @@ export async function convertToM4a(inputPath: string): Promise<string> {
   await new Promise<void>((resolve, reject) => {
     const ff = spawn('ffmpeg', [
       '-y', '-i', inputPath,
-      '-c:a', 'aac', '-b:a', '64k', '-ar', '44100',
+      // Keep an iOS/Android-friendly AAC-LC profile and put moov atom first.
+      // Some mobile clients show "--:--" or fail playback if metadata is tail-loaded.
+      '-c:a', 'aac', '-profile:a', 'aac_low', '-b:a', '64k', '-ac', '1', '-ar', '44100',
+      '-movflags', '+faststart',
       '-vn', outputPath,
     ]);
     ff.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg exit ${code}`)));

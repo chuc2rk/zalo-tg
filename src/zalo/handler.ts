@@ -581,13 +581,13 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
       // Skip TG→Zalo echo (re-emitted by Zalo server) but forward
       // real self messages sent directly from the Zalo app.
       if (msg.isSelf) {
-        // Zalo echo events may expose either msgId or realMsgId depending on
-        // message type/API path. Check both to avoid forwarding our own TG→Zalo
-        // sends back into Telegram as duplicate self messages.
-        const selfMsgIds = [msg.data.msgId, msg.data.realMsgId]
-          .filter((id): id is string => typeof id === 'string' && id.length > 0);
+        // Zalo echo events may expose msgId, realMsgId, or cliMsgId depending on
+        // message type/API path. Check all known IDs to avoid forwarding our own
+        // TG→Zalo sends back into Telegram as duplicate self messages.
+        const selfMsgIds = [msg.data.msgId, msg.data.realMsgId, msg.data.cliMsgId]
+          .filter((id): id is string => typeof id === 'string' && id.length > 0 && id !== '0');
 
-        // If this msgId/realMsgId is already tracked in sentMsgStore OR we're in the
+        // If this msgId/realMsgId/cliMsgId is already tracked in sentMsgStore OR we're in the
         // middle of sending to this Zalo thread → it's an echo, skip. Before
         // skipping, capture the rich self-echo quote payload (content/propertyExt/
         // msgType/cliMsgId) so Telegram replies to TG-originated files/media render

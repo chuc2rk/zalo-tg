@@ -2236,7 +2236,14 @@ sentMsgStore.save(msg.message_id, { msgIds: [zaloMsgId], zaloId, threadType });
           const voiceUrl = uploaded[0]?.fileUrl;
           if (!voiceUrl) throw new Error('No fileUrl from uploadAttachment');
           console.log(`[TG→Zalo] Sending voice → ${voiceUrl}`);
-          const voiceResult = await api.sendVoice({ voiceUrl }, zaloId, threadType) as Record<string, unknown>;
+          // Zalo mobile relies heavily on duration metadata for native voice UX.
+          // Keep the value in milliseconds to match zca-js video/voice internals.
+          const voiceDurationMs = Math.max(0, (msg.voice.duration ?? 0) * 1000);
+          const voiceResult = await api.sendVoice(
+            voiceDurationMs > 0 ? { voiceUrl, duration: voiceDurationMs } : { voiceUrl },
+            zaloId,
+            threadType,
+          ) as Record<string, unknown>;
           const voiceMsgId = voiceResult?.msgId ?? (voiceResult?.message as Record<string, unknown> | undefined)?.msgId;
           if (voiceMsgId != null && !Number.isNaN(Number(voiceMsgId))) {
             sentMsgStore.save(msg.message_id, { msgIds: [Number(voiceMsgId)], zaloId, threadType });
@@ -2628,4 +2635,3 @@ sentMsgStore.save(msg.message_id, { msgIds: [zaloMsgId], zaloId, threadType });
 }
 
 // Called by setupTelegramHandler, but defined after so we can reference tgBot directly.
-
