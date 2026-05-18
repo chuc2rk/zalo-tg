@@ -244,9 +244,7 @@ async function isMutedZaloGroup(api: ZaloAPI, groupId: string): Promise<boolean>
 // In-flight topic creation promises — prevents duplicate topic creation when
 // many messages arrive concurrently for the same conversation (e.g. 20-photo album).
 const _pendingTopics = new Map<string, Promise<number>>();
-const ZALO_DM_INBOX_ID = '__zalo_dm_inbox__';
-const ZALO_DM_INBOX_NAME = '🔔 Inbox';
-const ZALO_DM_INBOX_MENTION = process.env.ZALO_DM_INBOX_MENTION?.trim() || '@chuc2rk';
+const ZALO_DM_MENTION = process.env.ZALO_DM_MENTION?.trim() || '@chuc2rk';
 
 async function resolveUserDisplayName(api: ZaloAPI, uid: string | undefined, fallback = 'ai đó'): Promise<string> {
   const cleanUid = uid?.trim();
@@ -373,9 +371,8 @@ async function _doCreateTopic(
   const existing = store.getTopicByZalo(zaloId, type);
   if (existing !== undefined) return existing;
 
-  const isDmInbox = zaloId === ZALO_DM_INBOX_ID;
-  const name  = isDmInbox ? displayName.slice(0, 128) : topicName(displayName, type);
-  const color = isDmInbox ? 0xFFD67E : (type === ThreadType.Group ? 0xFF93B2 : 0x6FB9F0);
+  const name  = topicName(displayName, type);
+  const color = type === ThreadType.Group ? 0xFF93B2 : 0x6FB9F0;
 
   let topic: { message_thread_id: number };
   try {
@@ -424,40 +421,6 @@ async function _doCreateTopic(
   }
 
   return topicId;
-}
-
-async function sendDmInboxNotification(
-  contactName: string,
-  preview: string,
-  originalTgMsgId?: number,
-): Promise<void> {
-  if (!preview.trim()) return;
-  try {
-    const inboxTopicId = await getOrCreateTopic(
-      ZALO_DM_INBOX_ID,
-      ThreadType.User,
-      ZALO_DM_INBOX_NAME,
-    );
-    const cleanPreview = truncate(preview.replace(/\s+/g, ' ').trim(), 220);
-    const text = [
-      `🔔 ${escapeHtml(ZALO_DM_INBOX_MENTION)}`,
-      `👤 <b>${escapeHtml(truncate(contactName, 64))}</b>`,
-      `💬 ${escapeHtml(cleanPreview)}`,
-    ].join('\n');
-    await tg.sendMessage(
-      config.telegram.groupId,
-      text,
-      {
-        message_thread_id: inboxTopicId,
-        parse_mode: 'HTML',
-        ...(originalTgMsgId !== undefined
-          ? { reply_parameters: { message_id: originalTgMsgId, allow_sending_without_reply: true } }
-          : {}),
-      },
-    );
-  } catch (err) {
-    console.warn('[Zalo→TG] Failed to send DM inbox notification:', err);
-  }
 }
 
 /**
@@ -792,7 +755,11 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         tgBase.reply_parameters = { message_id: tgReplyMsgId, allow_sending_without_reply: true };
       }
 
-      const caption = groupCaption(bridgeSenderName);
+      const shouldMentionDm = type === ThreadType.User && !msg.isSelf;
+      const withDmMention = (html: string): string => shouldMentionDm
+        ? `${escapeHtml(ZALO_DM_MENTION)}\n${html}`
+        : html;
+      const caption = withDmMention(groupCaption(bridgeSenderName));
       const tgOpts  = { ...tgBase, parse_mode: 'HTML' as const, caption };
 
       // Build quote data + mapping helper — saved after every successful TG send
@@ -822,11 +789,6 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         ...(msg.data.propertyExt ? { propertyExt: msg.data.propertyExt } : {}),
         zaloId,
         threadType: type,
-      };
-      const shouldNotifyDmInbox = type === ThreadType.User && !msg.isSelf && zaloId !== ZALO_DM_INBOX_ID;
-      const notifyDmInbox = (preview: string, sent?: { message_id: number }) => {
-        if (!shouldNotifyDmInbox) return;
-        void sendDmInboxNotification(displayName, preview, sent?.message_id);
       };
       const saveTgMapping = (sent: { message_id: number }) => {
         msgStore.save(sent.message_id, zaloMsgIds, zaloQuoteData);
@@ -884,14 +846,13 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         const bodyHtml = (safeMentions?.length || safeStyles?.length)
           ? applyZaloMarkupHtml(safeBody, safeMentions, safeStyles)
           : escapeHtml(safeBody);
-        const tgText = formatGroupMsgHtml(bridgeSenderName, bodyHtml);
+        const tgText = withDmMention(formatGroupMsgHtml(bridgeSenderName, bodyHtml));
         const sent = await tg.sendMessage(
           config.telegram.groupId,
           tgText,
           { ...tgBase, parse_mode: 'HTML' },
         );
         saveTgMapping(sent);
-        notifyDmInbox(body, sent);
         return;
       }
 
@@ -943,7 +904,6 @@ ${escapeHtml(photoCaption)}`
                 // Use buf.zaloQuote which already has the correct cliMsgId and
                 // parsed media content object (not raw JSON string).
                 msgStore.save(sent.message_id, buf.zaloMsgIds, buf.zaloQuote!);
-                notifyDmInbox(photoCaption ? `📷 ${photoCaption}` : '📷 Ảnh', sent);
               } finally { await cleanTemp(localPath); }
             } else {
               // Multi-photo album — download all concurrently and send as media group
@@ -981,7 +941,6 @@ ${escapeHtml(photoCaption)}`
                   for (const sentMsg of sentMsgs) {
                     msgStore.save(sentMsg.message_id, buf.zaloMsgIds, buf.zaloQuote!);
                   }
-                  if (i === 0) notifyDmInbox(photoCaption ? `📷 ${photoCaption}` : `📷 Album ${localPaths.length} ảnh`, sentMsgs[0]);
                 }
               } finally {
                 for (const lp of localPaths) await cleanTemp(lp);
@@ -1003,7 +962,6 @@ ${escapeHtml(photoCaption)}`
         try {
           const sent = await tg.sendPhoto(config.telegram.groupId, { source: stream }, tgOpts);
           saveTgMapping(sent);
-          notifyDmInbox('🖼️ Doodle', sent);
         } finally { await cleanTemp(localPath); }
         return;
       }
@@ -1025,7 +983,6 @@ ${escapeHtml(photoCaption)}`
             tgOpts,
           );
           saveTgMapping(sent);
-          notifyDmInbox('🎞️ GIF', sent);
         } finally { await cleanTemp(localPath); }
         return;
       }
@@ -1048,7 +1005,6 @@ ${escapeHtml(photoCaption)}`
             tgOpts,
           );
           saveTgMapping(sent);
-          notifyDmInbox(`📎 ${fileName}`, sent);
         } finally { await cleanTemp(localPath); }
         return;
       }
@@ -1062,7 +1018,6 @@ ${escapeHtml(photoCaption)}`
         try {
           const sent = await tg.sendVideo(config.telegram.groupId, { source: stream }, tgOpts);
           saveTgMapping(sent);
-          notifyDmInbox('🎬 Video', sent);
         } finally { await cleanTemp(localPath); }
         return;
       }
@@ -1077,7 +1032,6 @@ ${escapeHtml(photoCaption)}`
         try {
           const sent = await tg.sendVoice(config.telegram.groupId, { source: stream }, tgOpts);
           saveTgMapping(sent);
-          notifyDmInbox('🎤 Tin nhắn thoại', sent);
         } finally { await cleanTemp(localPath); }
         return;
       }
@@ -1130,7 +1084,6 @@ ${escapeHtml(photoCaption)}`
               }
             }
             saveTgMapping(sent);
-            notifyDmInbox('🙂 Sticker', sent);
           } finally { await cleanTemp(localPath); }
         } catch (stickerErr) {
           console.error('[ZaloHandler] Sticker fetch error:', stickerErr);
@@ -1148,7 +1101,6 @@ ${escapeHtml(photoCaption)}`
           const callText = params.calltype === 1 ? '📹 cuộc gọi video nhỡ' : '📞 cuộc gọi thoại nhỡ';
           const sent = await tg.sendMessage(config.telegram.groupId, callText, tgBase);
           saveTgMapping(sent);
-          notifyDmInbox(callText, sent);
           return;
         }
         const href = media.href
