@@ -20,6 +20,8 @@ const BOT_COMMANDS = [
   { command: 'joingroup',      description: 'Tham gia nhóm Zalo qua link mời' },
   { command: 'leavegroup',     description: 'Rời nhóm Zalo của topic hiện tại' },
   { command: 'status',         description: 'Xem trạng thái kết nối & thống kê bridge' },
+  { command: 'admin',          description: 'Admin panel: trạng thái, cache, tra mapping' },
+  { command: 'update',         description: 'Kiểm tra bản cập nhật mới cho bridge' },
 ];
 
 /** Singleton Telegraf bot instance shared across the app. */

@@ -98,6 +98,8 @@ async function main(): Promise<void> {
   // ── Register bot commands for Telegram menu ───────────────────────────────
   tgBot.telegram.setMyCommands([
     { command: 'login',          description: 'Đăng nhập Zalo qua QR code' },
+    { command: 'loginweb',       description: 'Đăng nhập Zalo QR (giống /login)' },
+    { command: 'loginapp',       description: 'Đăng nhập Zalo qua PC App API' },
     { command: 'search',         description: 'Tìm bạn bè / nhóm Zalo để tạo topic' },
     { command: 'addfriend',      description: 'Tìm & kết bạn Zalo theo số điện thoại' },
     { command: 'addgroup',       description: 'Tạo topic cho nhóm Zalo chưa có topic' },
@@ -108,6 +110,7 @@ async function main(): Promise<void> {
     { command: 'recall',         description: 'Thu hồi tin nhắn (reply vào tin đã gửi)' },
     { command: 'admin',          description: 'Admin panel: trạng thái, cache, tra mapping' },
     { command: 'status',         description: 'Xem trạng thái bridge: uptime, số topic, Zalo' },
+    { command: 'update',         description: 'Kiểm tra bản cập nhật mới' },
   ]).catch(() => undefined);
 
   // ── Start Telegram bot so /login can be received immediately ───────────────
