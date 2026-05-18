@@ -439,11 +439,28 @@ export function setupTelegramHandler(
       const lines = all.map(e =>
         `• <b>${e.name}</b> — topicId=${e.topicId}, zaloId=${e.zaloId}, type=${e.type === 1 ? 'group' : 'dm'}`,
       );
-      await ctx.telegram.sendMessage(
-        config.telegram.groupId,
-        `📋 <b>Bridge topics</b> (${all.length}):\n${lines.join('\n')}`,
-        { ...replyOpts, parse_mode: 'HTML' },
-      );
+      const header = `📋 <b>Bridge topics</b> (${all.length})`;
+      let chunk = header;
+      for (const line of lines) {
+        const next = `${chunk}\n${line}`;
+        if (next.length > 3500) {
+          await ctx.telegram.sendMessage(
+            config.telegram.groupId,
+            chunk,
+            { ...replyOpts, parse_mode: 'HTML' },
+          );
+          chunk = line;
+        } else {
+          chunk = next;
+        }
+      }
+      if (chunk) {
+        await ctx.telegram.sendMessage(
+          config.telegram.groupId,
+          chunk,
+          { ...replyOpts, parse_mode: 'HTML' },
+        );
+      }
       return;
     }
 
