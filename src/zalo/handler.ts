@@ -12,7 +12,7 @@ import { config } from '../config.js';
 import { downloadToTemp, cleanTemp } from '../utils/media.js';
 import { applyZaloMarkupHtml, formatGroupMsgHtml, formatGroupMsg, groupCaption, topicName, truncate, escapeHtml } from '../utils/format.js';
 import type { ZaloStyle } from '../utils/format.js';
-import { msgStore, userCache, pollStore, sentMsgStore, zaloAlbumStore, reactionEchoStore, reactionSummaryStore, aliasCache, friendsCache, recentlyRecalledMsgIds, type ZaloQuoteData } from '../store.js';
+import { msgStore, userCache, pollStore, sentMsgStore, zaloAlbumStore, reactionEchoStore, reactionSummaryStore, reactionEventDedupeStore, aliasCache, friendsCache, recentlyRecalledMsgIds, type ZaloQuoteData } from '../store.js';
 import { tgQueue } from '../utils/tgQueue.js';
 
 // Proxy that routes every tg.* call through the rate-limit queue
@@ -1670,21 +1670,46 @@ ${escapeHtml(photoCaption)}`
       const rIcon: string = data?.content?.rIcon ?? '';
       const emoji = REACTION_EMOJI[rIcon] ?? rIcon;
 
-      const gMsgIds: Array<{ gMsgID?: string | number }> = data?.content?.rMsg ?? [];
-      const zaloMsgId = String(gMsgIds[0]?.gMsgID ?? '');
-      if (!zaloMsgId) return;
+      // If empty reaction icon → user removed reaction; keep our remove-summary
+      // behavior below, but still resolve target IDs robustly.
+      const rMsgs: Array<{ gMsgID?: string | number; cMsgID?: string | number }> = data?.content?.rMsg ?? [];
+      const targetMsgIds = Array.from(new Set([
+        String(rMsgs[0]?.gMsgID ?? ''),
+        String(rMsgs[0]?.cMsgID ?? ''),
+        String(data?.msgId ?? ''),
+        String(data?.cliMsgId ?? ''),
+      ].map(id => id.trim()).filter(id => id && id !== '0')));
+      if (targetMsgIds.length === 0) return;
 
       const zaloId = String(reaction?.threadId ?? data?.idTo ?? "");
       if (!zaloId) return;
 
-      if (rIcon && reaction?.isSelf && reactionEchoStore.consume(zaloId, zaloMsgId, rIcon)) {
-        console.log(`[ZaloHandler] Reaction: skip bridge echo for ${zaloId}/${zaloMsgId}/${rIcon}`);
+      const actorUid = typeof data?.uidFrom === 'string' ? data.uidFrom.trim() : '';
+      const rawName = typeof data?.dName === 'string' ? data.dName.trim() : '';
+
+      if (reactionEventDedupeStore.isDuplicateZaloInbound({
+        zaloId,
+        targetMsgIds,
+        icon: rIcon,
+        actorUid: actorUid || undefined,
+        actorName: rawName || undefined,
+      })) {
+        console.log(`[ZaloHandler] Reaction: skip duplicate event ${zaloId}/${targetMsgIds.join('|')}/${rIcon}`);
         return;
       }
 
-      const tgMsgId = msgStore.getTgMsgId(zaloMsgId) ?? sentMsgStore.getByZaloMsgId(zaloMsgId);
+      if (reaction?.isSelf && targetMsgIds.some(msgId => reactionEchoStore.consume(zaloId, msgId, rIcon))) {
+        console.log(`[ZaloHandler] Reaction: skip bridge echo for ${zaloId}/${targetMsgIds.join('|')}/${rIcon}`);
+        return;
+      }
+
+      let tgMsgId: number | undefined;
+      for (const msgId of targetMsgIds) {
+        tgMsgId = msgStore.getTgMsgId(msgId) ?? sentMsgStore.getByZaloMsgId(msgId);
+        if (tgMsgId !== undefined) break;
+      }
       if (tgMsgId === undefined) {
-        console.log(`[ZaloHandler] Reaction: no TG mapping for zaloMsgId=${zaloMsgId}`);
+        console.log(`[ZaloHandler] Reaction: no TG mapping for target=${targetMsgIds.join('|')}`);
         return;
       }
 
@@ -1692,9 +1717,7 @@ ${escapeHtml(photoCaption)}`
       const topicId = store.getTopicByZalo(zaloId, type);
       if (topicId === undefined) return;
 
-      const rawName = typeof data?.dName === 'string' ? data.dName.trim() : '';
-      const actorUid = typeof data?.uidFrom === 'string' ? data.uidFrom : undefined;
-      const actorName = rawName || await resolveUserDisplayName(api, actorUid, 'ai đó');
+      const actorName = rawName || await resolveUserDisplayName(api, actorUid || undefined, 'ai đó');
 
       // Aggregate reactions: update the summary entry then debounce send/edit.
       const entry = rIcon

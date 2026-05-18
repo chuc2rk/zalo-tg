@@ -36,7 +36,7 @@ import { promisify } from 'util';
 const execFileAsync = promisify(execFile);
 
 import type { ZaloAPI } from '../zalo/types.js';
-import { store, msgStore, userCache, friendsCache, groupsCache, sentMsgStore, pollStore, mediaGroupStore, reactionEchoStore, reactionSummaryStore, aliasCache, markRecalled, type ZaloQuoteData } from '../store.js';
+import { store, msgStore, userCache, friendsCache, groupsCache, sentMsgStore, pollStore, mediaGroupStore, reactionEchoStore, reactionSummaryStore, reactionEventDedupeStore, aliasCache, markRecalled, type ZaloQuoteData } from '../store.js';
 import { tgBot } from './bot.js';
 import { config } from '../config.js';
 import { downloadToTemp, cleanTemp, convertToM4a, extractVideoThumbnail, convertWebmToGif } from '../utils/media.js';
@@ -1577,6 +1577,25 @@ export function setupTelegramHandler(
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const tgEmoji = (added[0] as any).emoji as string;
+      const tgMsgId = update.message_id;
+      const actorId = String(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (update as any).user?.id
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ?? (update as any).actor_chat?.id
+        ?? 'unknown',
+      );
+      const chatId = Number(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (update as any).chat?.id
+        ?? ctx.chat?.id
+        ?? 0,
+      );
+
+      if (reactionEventDedupeStore.isDuplicateTgOutbound({ chatId, messageId: tgMsgId, actorId, emoji: tgEmoji })) {
+        console.log(`[TG→Zalo] Reaction: skip duplicate update chat=${chatId} msg=${tgMsgId} actor=${actorId} emoji=${tgEmoji}`);
+        return;
+      }
 
       // Map TG emoji → Zalo Reactions icon
       // Zalo Reactions enum values are the icon strings used in addReaction
@@ -1625,7 +1644,6 @@ export function setupTelegramHandler(
       }
 
       // Look up Zalo quote data for this TG message
-      const tgMsgId = update.message_id;
       const quote   = msgStore.getQuote(tgMsgId);
       if (!quote) {
         console.log(`[TG→Zalo] Reaction: no Zalo quote for TG msg ${tgMsgId}`);
@@ -1638,7 +1656,7 @@ export function setupTelegramHandler(
       reactionEchoStore.mark(quote.zaloId, quote.msgId, zaloIcon);
       try {
         await currentApi.addReaction(
-          { rType: 0, source: 0, icon: zaloIcon },
+          zaloIcon as unknown as import('zca-js').Reactions,
           {
             data: { msgId: quote.msgId, cliMsgId: quote.cliMsgId },
             threadId: quote.zaloId,
