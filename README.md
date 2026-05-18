@@ -719,6 +719,7 @@ Thanks to everyone who has contributed to this project.
 
 - [@thanhnguyenhy234](https://github.com/thanhnguyenhy234)
 - [@leolionart](https://github.com/leolionart)
+- [@chuc2rk](https://github.com/chuc2rk)
 
 ### Contributing
 
