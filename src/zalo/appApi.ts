@@ -94,6 +94,8 @@ function buildCookieHeader(cookies: Array<{ name: string; value: string; domain:
 // ── Group info (PC App, bypasses web-API rate limit) ─────────────────────────
 
 export interface AppGroupData {
+  name?: string;
+  avt?: string;
   memVerList?:  string[];
   currentMems?: Array<{ id: string; dName?: string; zaloName?: string }>;
   totalMember?: number;

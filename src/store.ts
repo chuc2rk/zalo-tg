@@ -327,7 +327,14 @@ export const msgStore = {
       }
       _zaloToTg.set(id, tgMsgId);
     }
-    _tgToQuote.set(tgMsgId, quote);
+    const existingQuote = _tgToQuote.get(tgMsgId);
+    const isPlaceholderQuote = (!quote.cliMsgId || quote.cliMsgId === '0') && quote.msgType === 'webchat';
+    const hasRicherExistingQuote = existingQuote !== undefined
+      && Boolean(existingQuote.cliMsgId && existingQuote.cliMsgId !== '0')
+      && (existingQuote.msgType !== 'webchat' || typeof existingQuote.content !== 'string');
+    if (!isPlaceholderQuote || !hasRicherExistingQuote) {
+      _tgToQuote.set(tgMsgId, quote);
+    }
     _scheduleMsgPersist();
   },
 
@@ -669,6 +676,7 @@ export interface SentMsgInfo {
 
 const _sentMap      = new Map<number, SentMsgInfo>(); // tgMsgId → info
 const _sentByZaloId = new Map<string, number>();       // String(zaloMsgId) → tgMsgId
+const _pendingQuoteByZaloId = new Map<string, ZaloQuoteData>(); // echo quote captured before send result
 
 /** Insertion-order tracking for sentMap eviction (oldest first) */
 const _sentKeyOrder: number[] = [];
@@ -698,6 +706,19 @@ export const sentMsgStore = {
     for (const mid of info.msgIds) {
       _sentByZaloId.set(String(mid), tgMsgId);
     }
+
+    // Zalo can emit the self-echo before api.sendMessage/upload resolves,
+    // especially in DMs. In that race, attachQuote() cannot resolve tgMsgId yet,
+    // so it parks the rich quote payload here. Consume it as soon as save() binds
+    // the returned Zalo ids to this Telegram message.
+    const pendingQuote = info.msgIds
+      .map(mid => _pendingQuoteByZaloId.get(String(mid)))
+      .find((quote): quote is ZaloQuoteData => quote !== undefined);
+    if (pendingQuote) {
+      _tgToQuote.set(tgMsgId, pendingQuote);
+      _scheduleMsgPersist();
+      for (const mid of info.msgIds) _pendingQuoteByZaloId.delete(String(mid));
+    }
   },
 
   get(tgMsgId: number): SentMsgInfo | undefined {
@@ -726,7 +747,10 @@ export const sentMsgStore = {
   attachQuote(zaloMsgIds: string[], quote: ZaloQuoteData): void {
     const ids = zaloMsgIds.map(id => String(id)).filter(id => id && id !== '0');
     const tgMsgId = ids.map(id => _sentByZaloId.get(id) ?? _zaloToTg.get(id)).find((id): id is number => id !== undefined);
-    if (tgMsgId === undefined) return;
+    if (tgMsgId === undefined) {
+      for (const id of ids) _pendingQuoteByZaloId.set(id, quote);
+      return;
+    }
 
     // The API response msgId, self-echo msgId, realMsgId/globalMsgId, and
     // cliMsgId can differ. Bind every known self-echo id back to the same TG
