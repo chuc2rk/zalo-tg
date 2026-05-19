@@ -42,7 +42,7 @@ import { config } from '../config.js';
 import { downloadToTemp, cleanTemp, convertToM4a, extractVideoThumbnail, convertWebmToGif } from '../utils/media.js';
 import { triggerQRLogin } from '../zalo/client.js';
 import { triggerAppLogin } from '../zalo/loginApp.js';
-import { invalidateAppSession, appGetReceivedFriendRequests, appGetSentFriendRequests } from '../zalo/appApi.js';
+import { invalidateAppSession, appGetReceivedFriendRequests, appGetSentFriendRequests, appGetGroupInfo, appGetGroupMembersInfo } from '../zalo/appApi.js';
 import { escapeHtml } from '../utils/format.js';
 import { triggerUpdateCheck } from '../updater.js';
 
@@ -506,6 +506,141 @@ export function setupTelegramHandler(
       '❓ Dùng: <code>/topic list</code> | <code>/topic info</code> | <code>/topic delete</code>',
       { ...replyOpts, parse_mode: 'HTML' },
     );
+  });
+
+  // /group_info — show Zalo group metadata and member names for the current topic.
+  // Usage inside a Zalo group topic: /group_info [all]
+  tgBot.command('group_info', async (ctx) => {
+    if (ctx.chat.id !== config.telegram.groupId) return;
+    const topicId = 'message_thread_id' in ctx.message
+      ? (ctx.message.message_thread_id as number | undefined)
+      : undefined;
+    const replyOpts = topicId ? { message_thread_id: topicId } : {};
+
+    if (!topicId) {
+      await ctx.telegram.sendMessage(
+        config.telegram.groupId,
+        '⚠️ Hãy gửi <code>/group_info</code> trong topic của nhóm Zalo cần xem.',
+        { ...replyOpts, parse_mode: 'HTML' },
+      );
+      return;
+    }
+
+    const entry = store.getEntryByTopic(topicId);
+    if (!entry || entry.type !== 1) {
+      await ctx.telegram.sendMessage(config.telegram.groupId, '❌ Topic này không phải nhóm Zalo.', replyOpts);
+      return;
+    }
+
+    if (!currentApi) {
+      await ctx.telegram.sendMessage(config.telegram.groupId, '❌ Zalo chưa kết nối', replyOpts);
+      return;
+    }
+
+    const showAll = /\ball\b/i.test(ctx.message.text ?? '');
+    const groupId = entry.zaloId;
+
+    try {
+      let groupData = await appGetGroupInfo(groupId);
+      if (!groupData) {
+        const info = await currentApi.getGroupInfo(groupId) as {
+          gridInfoMap?: Record<string, {
+            name?: string;
+            avt?: string;
+            memVerList?: string[];
+            currentMems?: Array<{ id: string; dName?: string; zaloName?: string }>;
+            totalMember?: number;
+            hasMoreMember?: number;
+          }>;
+        } | undefined;
+        groupData = info?.gridInfoMap?.[groupId] ?? null;
+      }
+
+      if (!groupData) {
+        await ctx.telegram.sendMessage(
+          config.telegram.groupId,
+          '❌ Không lấy được thông tin nhóm từ Zalo API. Có thể session hết hạn hoặc Zalo đang giới hạn request.',
+          replyOpts,
+        );
+        return;
+      }
+
+      const knownNames = new Map<string, string>();
+      for (const m of groupData.currentMems ?? []) {
+        const name = m.dName?.trim() || m.zaloName?.trim();
+        if (m.id && name) knownNames.set(m.id, name);
+      }
+
+      const memberUids = Array.from(new Set(
+        (groupData.memVerList ?? [])
+          .map(s => String(s).split('_')[0])
+          .filter(Boolean),
+      ));
+
+      const missingUids = memberUids.filter(uid => !knownNames.has(uid));
+      if (missingUids.length > 0) {
+        const appNames = await appGetGroupMembersInfo(missingUids).catch(() => null);
+        for (const uid of missingUids) {
+          const name = appNames?.get(uid);
+          if (name) knownNames.set(uid, name);
+        }
+      }
+
+      const members = memberUids
+        .map(uid => ({ uid, name: knownNames.get(uid) ?? uid }))
+        .sort((a, b) => a.name.localeCompare(b.name, 'vi'));
+
+      const groupName = groupData.name?.trim() || entry.name;
+      const totalMember = groupData.totalMember ?? memberUids.length;
+      const resolvedCount = members.filter(m => m.name !== m.uid).length;
+      const displayLimit = showAll ? members.length : 120;
+      const visibleMembers = members.slice(0, displayLimit);
+
+      const headerLines = [
+        `👥 <b>${escapeHtml(groupName)}</b>`,
+        `Zalo ID: <code>${escapeHtml(groupId)}</code>`,
+        `Thành viên: <b>${totalMember ?? '?'}</b>`,
+        `Đọc được tên: <b>${resolvedCount}/${memberUids.length}</b>`,
+      ];
+      if (!showAll && members.length > displayLimit) {
+        headerLines.push(``, `ℹ️ Đang hiện ${displayLimit}/${members.length} người. Gõ <code>/group_info all</code> để xem hết.`);
+      }
+
+      const lines = visibleMembers.map((m, idx) => {
+        const suffix = m.name === m.uid ? ` <code>${escapeHtml(m.uid)}</code>` : '';
+        return `${idx + 1}. ${escapeHtml(m.name)}${suffix}`;
+      });
+
+      if (lines.length === 0) {
+        await ctx.telegram.sendMessage(
+          config.telegram.groupId,
+          `${headerLines.join('\n')}\n\n⚠️ Zalo API không trả danh sách UID thành viên cho nhóm này.`,
+          { ...replyOpts, parse_mode: 'HTML' },
+        );
+        return;
+      }
+
+      let chunk = `${headerLines.join('\n')}\n\n<b>Danh sách:</b>`;
+      for (const line of lines) {
+        const next = `${chunk}\n${line}`;
+        if (next.length > 3500) {
+          await ctx.telegram.sendMessage(config.telegram.groupId, chunk, { ...replyOpts, parse_mode: 'HTML' });
+          chunk = line;
+        } else {
+          chunk = next;
+        }
+      }
+      if (chunk) {
+        await ctx.telegram.sendMessage(config.telegram.groupId, chunk, { ...replyOpts, parse_mode: 'HTML' });
+      }
+    } catch (err) {
+      console.error('[/group_info]', err);
+      await ctx.telegram.sendMessage(
+        config.telegram.groupId,
+        `❌ Lỗi lấy thông tin nhóm: ${escapeHtml(err instanceof Error ? err.message : String(err))}`,
+        { ...replyOpts, parse_mode: 'HTML' },
+      );
+    }
   });
 
   tgBot.command('recall', async (ctx) => {
