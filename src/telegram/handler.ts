@@ -587,7 +587,15 @@ export function setupTelegramHandler(
       }
 
       const members = memberUids
-        .map(uid => ({ uid, name: knownNames.get(uid) ?? uid }))
+        .map(uid => {
+          const profileName = knownNames.get(uid);
+          return {
+            uid,
+            name: aliasCache.get(uid)?.trim() || profileName || uid,
+            profileName,
+            isAlias: Boolean(aliasCache.get(uid)?.trim()),
+          };
+        })
         .sort((a, b) => a.name.localeCompare(b.name, 'vi'));
 
       const groupName = groupData.name?.trim() || entry.name;
@@ -607,7 +615,9 @@ export function setupTelegramHandler(
       }
 
       const lines = visibleMembers.map((m, idx) => {
-        const suffix = m.name === m.uid ? ` <code>${escapeHtml(m.uid)}</code>` : '';
+        const suffix = m.name === m.uid
+          ? ` <code>${escapeHtml(m.uid)}</code>`
+          : (m.isAlias && m.profileName && m.profileName !== m.name ? ` <i>(${escapeHtml(m.profileName)})</i>` : '');
         return `${idx + 1}. ${escapeHtml(m.name)}${suffix}`;
       });
 
