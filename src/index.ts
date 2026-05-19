@@ -101,6 +101,8 @@ async function main(): Promise<void> {
     { command: 'loginweb',       description: 'Đăng nhập Zalo QR (giống /login)' },
     { command: 'loginapp',       description: 'Đăng nhập Zalo qua PC App API' },
     { command: 'search',         description: 'Tìm bạn bè / nhóm Zalo để tạo topic' },
+    { command: 'group_info',     description: 'Xem thông tin & thành viên nhóm Zalo hiện tại' },
+    { command: 'group_infoall',  description: 'Xem toàn bộ thành viên nhóm Zalo hiện tại' },
     { command: 'addfriend',      description: 'Tìm & kết bạn Zalo theo số điện thoại' },
     { command: 'addgroup',       description: 'Tạo topic cho nhóm Zalo chưa có topic' },
     { command: 'joingroup',      description: 'Tham gia nhóm Zalo qua link' },
