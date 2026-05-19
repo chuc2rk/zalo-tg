@@ -43,7 +43,7 @@ import { config } from '../config.js';
 import { downloadToTemp, cleanTemp, convertToM4a, extractVideoThumbnail, convertWebmToGif } from '../utils/media.js';
 import { triggerQRLogin } from '../zalo/client.js';
 import { triggerAppLogin } from '../zalo/loginApp.js';
-import { invalidateAppSession, appGetReceivedFriendRequests, appGetSentFriendRequests, appGetGroupInfo, appGetGroupMembersInfo } from '../zalo/appApi.js';
+import { invalidateAppSession, appGetReceivedFriendRequests, appGetSentFriendRequests, appGetGroupInfo, appGetGroupMembersInfo, appRequestVoiceCall, appRequestGroupVoiceCall } from '../zalo/appApi.js';
 import { escapeHtml } from '../utils/format.js';
 import { triggerUpdateCheck } from '../updater.js';
 
@@ -506,6 +506,258 @@ export function setupTelegramHandler(
       config.telegram.groupId,
       '❓ Dùng: <code>/topic list</code> | <code>/topic info</code> | <code>/topic delete</code>',
       { ...replyOpts, parse_mode: 'HTML' },
+    );
+  });
+
+  // /call — trigger a personal call request for current mapped DM topic.
+  // Usage in a personal topic: /call or /call video
+  tgBot.command('call', async (ctx) => {
+    if (ctx.chat.id !== config.telegram.groupId) return;
+    const topicId = 'message_thread_id' in ctx.message
+      ? (ctx.message.message_thread_id as number | undefined)
+      : undefined;
+    const replyOpts = topicId ? { message_thread_id: topicId } : {};
+
+    if (!topicId) {
+      await ctx.telegram.sendMessage(
+        config.telegram.groupId,
+        '⚠️ Hãy gửi <code>/call</code> trong topic cá nhân cần gọi.',
+        { ...replyOpts, parse_mode: 'HTML' },
+      );
+      return;
+    }
+
+    const entry = store.getEntryByTopic(topicId);
+    if (!entry || entry.type !== 0) {
+      await ctx.telegram.sendMessage(
+        config.telegram.groupId,
+        '❌ Topic này không phải chat cá nhân Zalo.',
+        replyOpts,
+      );
+      return;
+    }
+
+    const arg = (ctx.message.text ?? '').replace(/^\/call(?:@[A-Za-z0-9_]+)?/i, '').trim().toLowerCase();
+    const kind = (arg === 'video' || arg === 'cam') ? 'video' : 'audio';
+    console.log(`[TG→Zalo][call] start topicId=${topicId} zaloId=${entry.zaloId} kind=${kind}`);
+
+    await ctx.telegram.sendMessage(
+      config.telegram.groupId,
+      `📞 Đang gửi yêu cầu cuộc gọi ${kind === 'video' ? 'video' : 'thoại'} tới <b>${escapeHtml(entry.name)}</b>...`,
+      { ...replyOpts, parse_mode: 'HTML' },
+    );
+
+    const result = await appRequestVoiceCall(entry.zaloId, kind);
+    if (!result) {
+      await ctx.telegram.sendMessage(
+        config.telegram.groupId,
+        '❌ Không có App session. Dùng <code>/loginapp</code> trước rồi thử lại.',
+        { ...replyOpts, parse_mode: 'HTML' },
+      );
+      return;
+    }
+
+    const { request, response } = result;
+    const statusNum =
+      response.data && typeof response.data === 'object' && 'status' in response.data
+        ? (response.data as { status?: unknown }).status
+        : undefined;
+    if (response.data !== undefined) {
+      console.log('[TG→Zalo][call] response.data =', JSON.stringify(response.data));
+    }
+
+    if (response.errorCode === 0) {
+      const reqSignalCode = result.signals?.request?.errorCode;
+      const ringSignalCode = result.signals?.ringring?.errorCode;
+      if (result.signals?.request) {
+        console.log(
+          `[TG→Zalo][call] signal request errorCode=${result.signals.request.errorCode} message=${result.signals.request.errorMessage}`,
+        );
+      }
+      if (result.signals?.ringring) {
+        console.log(
+          `[TG→Zalo][call] signal ringring errorCode=${result.signals.ringring.errorCode} message=${result.signals.ringring.errorMessage}`,
+        );
+      }
+      console.log(
+        '✅ Đã gửi request gọi.\n' +
+        `• calleeId: ${request.calleeId}\n` +
+        `• callId: ${request.callId}\n` +
+        (statusNum !== undefined ? `• status: ${String(statusNum)}` : ''),
+      );
+      const signalingOk = (reqSignalCode === undefined || reqSignalCode === 0)
+        && (ringSignalCode === undefined || ringSignalCode === 0);
+      await ctx.telegram.sendMessage(
+        config.telegram.groupId,
+        `${signalingOk ? '✅' : '⚠️'} Đã gửi request gọi.\n` +
+        `• calleeId: <code>${escapeHtml(request.calleeId)}</code>\n` +
+        `• callId: <code>${request.callId}</code>\n` +
+        (statusNum !== undefined ? `• status: <code>${escapeHtml(String(statusNum))}</code>\n` : '') +
+        (reqSignalCode !== undefined ? `• requestSignal: <code>${reqSignalCode}</code>\n` : '') +
+        (ringSignalCode !== undefined ? `• ringSignal: <code>${ringSignalCode}</code>` : ''),
+        { ...replyOpts, parse_mode: 'HTML' },
+      );
+      return;
+    }
+
+    await ctx.telegram.sendMessage(
+      config.telegram.groupId,
+      `❌ Gọi thất bại [${response.errorCode}]: ${escapeHtml(response.errorMessage)}`,
+      { ...replyOpts, parse_mode: 'HTML' },
+    );
+    console.warn(
+      `[TG→Zalo][call] failed topicId=${topicId} zaloId=${entry.zaloId} errorCode=${response.errorCode} errorMessage=${response.errorMessage}`,
+    );
+  });
+
+  // /callgroup — trigger a group VIDEO call request for current mapped Zalo group topic.
+  // Usage:
+  // - /callgroup                 -> video call all members found from group info
+  // - /callgroup video           -> video call
+  // - /callgroup <uid1> <uid2>  -> video call selected partner IDs only
+  tgBot.command('callgroup', async (ctx) => {
+    if (ctx.chat.id !== config.telegram.groupId) return;
+    const topicId = 'message_thread_id' in ctx.message
+      ? (ctx.message.message_thread_id as number | undefined)
+      : undefined;
+    const replyOpts = topicId ? { message_thread_id: topicId } : {};
+
+    if (!topicId) {
+      await ctx.telegram.sendMessage(
+        config.telegram.groupId,
+        '⚠️ Hãy gửi <code>/callgroup</code> trong topic nhóm Zalo cần gọi.',
+        { ...replyOpts, parse_mode: 'HTML' },
+      );
+      return;
+    }
+
+    const entry = store.getEntryByTopic(topicId);
+    if (!entry || entry.type !== 1) {
+      await ctx.telegram.sendMessage(
+        config.telegram.groupId,
+        '❌ Topic này không phải nhóm Zalo.',
+        replyOpts,
+      );
+      return;
+    }
+
+    const rawArgs = (ctx.message.text ?? '').replace(/^\/callgroup(?:@[A-Za-z0-9_]+)?/i, '').trim();
+    const tokens = rawArgs.length > 0
+      ? rawArgs.split(/[\s,]+/).map(t => t.trim()).filter(Boolean)
+      : [];
+    const kindToken = tokens[0]?.toLowerCase();
+    const isVideoKeyword = kindToken === 'video' || kindToken === 'cam';
+    const uidTokens = isVideoKeyword
+      ? tokens.slice(1)
+      : tokens;
+
+    let partners = uidTokens
+      .map(v => v.replace(/[^\d]/g, ''))
+      .filter(v => v.length > 0);
+
+    if (partners.length === 0) {
+      let groupData = await appGetGroupInfo(entry.zaloId);
+      if (!groupData && currentApi) {
+        try {
+          const info = await currentApi.getGroupInfo(entry.zaloId) as {
+            gridInfoMap?: Record<string, { memVerList?: string[] }>;
+          };
+          groupData = info?.gridInfoMap?.[entry.zaloId] ?? null;
+        } catch {
+          groupData = null;
+        }
+      }
+
+      partners = Array.from(new Set(
+        (groupData?.memVerList ?? [])
+          .map(v => String(v).split('_')[0]?.trim())
+          .filter((v): v is string => Boolean(v && v.length > 0)),
+      ));
+    }
+
+    if (partners.length === 0) {
+      await ctx.telegram.sendMessage(
+        config.telegram.groupId,
+        '❌ Không lấy được danh sách thành viên group để gọi.',
+        replyOpts,
+      );
+      return;
+    }
+
+    console.log(
+      `[TG→Zalo][callgroup] start topicId=${topicId} groupId=${entry.zaloId} kind=video partners=${partners.length}`,
+    );
+    await ctx.telegram.sendMessage(
+      config.telegram.groupId,
+      `📞 Đang gửi yêu cầu gọi nhóm <b>video</b> tới <b>${escapeHtml(entry.name)}</b>...`,
+      { ...replyOpts, parse_mode: 'HTML' },
+    );
+
+    const result = await appRequestGroupVoiceCall(entry.zaloId, partners, 'video');
+    if (!result) {
+      await ctx.telegram.sendMessage(
+        config.telegram.groupId,
+        '❌ Không có App session. Dùng <code>/loginapp</code> trước rồi thử lại.',
+        { ...replyOpts, parse_mode: 'HTML' },
+      );
+      return;
+    }
+
+    const statusNum =
+      result.response.data && typeof result.response.data === 'object' && 'status' in result.response.data
+        ? (result.response.data as { status?: unknown }).status
+        : undefined;
+
+    if (result.response.errorCode === 0) {
+      const ringrings = result.ringrings ?? [];
+      const failedRings = ringrings.filter(r => r.errorCode !== 0);
+      const ringOk = ringrings.length > 0 && failedRings.length === 0;
+      const ringStatuses = (result.diagnostics?.ringStatuses ?? [])
+        .map(r => `${r.calleeId}:${r.status ?? '?'}`)
+        .join(', ');
+      const requestSignalCode = result.diagnostics?.requestSignal?.errorCode;
+      const stateSignalCode = result.diagnostics?.state?.errorCode;
+      if (result.response.data !== undefined) {
+        console.log('[TG→Zalo][callgroup] response.data =', JSON.stringify(result.response.data));
+      }
+      for (const rr of ringrings) {
+        console.log(
+          `[TG→Zalo][callgroup] signal ringring calleeId=${rr.calleeId} errorCode=${rr.errorCode} message=${rr.errorMessage}`,
+        );
+      }
+      if (requestSignalCode !== undefined) {
+        console.log(
+          `[TG→Zalo][callgroup] signal request errorCode=${requestSignalCode} message=${result.diagnostics?.requestSignal?.errorMessage ?? ''}`,
+        );
+      }
+      if (stateSignalCode !== undefined) {
+        console.log(
+          `[TG→Zalo][callgroup] signal state errorCode=${stateSignalCode} message=${result.diagnostics?.state?.errorMessage ?? ''} hostCall=${result.diagnostics?.state?.hostCall ?? 0}`,
+        );
+      }
+      await ctx.telegram.sendMessage(
+        config.telegram.groupId,
+        `${ringOk ? '✅' : '⚠️'} Đã gửi request gọi nhóm.\n` +
+        `• groupId: <code>${escapeHtml(result.request.groupId)}</code>\n` +
+        `• callId: <code>${result.request.callId}</code>\n` +
+        `• partners: <code>${result.request.partners.length}</code>\n` +
+        (statusNum !== undefined ? `• status: <code>${escapeHtml(String(statusNum))}</code>\n` : '') +
+        `• ringSignals: <code>${ringrings.length}</code> ok / <code>${failedRings.length}</code> fail\n` +
+        (ringStatuses ? `• ringStatus: <code>${escapeHtml(ringStatuses)}</code>\n` : '') +
+        (requestSignalCode !== undefined ? `• requestSignal: <code>${requestSignalCode}</code>\n` : '') +
+        (stateSignalCode !== undefined ? `• stateSignal: <code>${stateSignalCode}</code>` : ''),
+        { ...replyOpts, parse_mode: 'HTML' },
+      );
+      return;
+    }
+
+    await ctx.telegram.sendMessage(
+      config.telegram.groupId,
+      `❌ Gọi nhóm thất bại [${result.response.errorCode}]: ${escapeHtml(result.response.errorMessage)}`,
+      { ...replyOpts, parse_mode: 'HTML' },
+    );
+    console.warn(
+      `[TG→Zalo][callgroup] failed topicId=${topicId} groupId=${entry.zaloId} errorCode=${result.response.errorCode} errorMessage=${result.response.errorMessage}`,
     );
   });
 
