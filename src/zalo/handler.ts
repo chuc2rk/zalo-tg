@@ -854,14 +854,21 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         const safeStyles = styles
           ?.filter(s => s.start < safeBody.length)
           .map(s => ({ ...s, len: Math.min(s.len, safeBody.length - s.start) }));
+        const ownUid = String(api.getOwnId?.() ?? '');
         const safeMentions = mentions
           ?.filter(m => m.pos < safeBody.length)
           .map(m => {
             const len = Math.min(m.len, safeBody.length - m.pos);
+            // Critical: when someone mentions Chức on Zalo, keep the Telegram
+            // username in the forwarded text so Telegram actually triggers a
+            // notification. Contact-name labels like @Chuc/@Chức render nicely
+            // but do not notify @chuc2rk.
             const contactName = m.type === 0
-              ? (friendsCache.get(m.uid)?.alias?.trim()
-                || friendsCache.get(m.uid)?.displayName?.trim()
-                || aliasCache.get(m.uid)?.trim())
+              ? (m.uid === ownUid
+                ? 'chuc2rk'
+                : (friendsCache.get(m.uid)?.alias?.trim()
+                  || friendsCache.get(m.uid)?.displayName?.trim()
+                  || aliasCache.get(m.uid)?.trim()))
               : undefined;
             return {
               ...m,
