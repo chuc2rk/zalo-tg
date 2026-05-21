@@ -364,15 +364,17 @@ async function maybeRenameExistingDmTopic(
   topicId: number,
   zaloId: string,
   displayName: string,
+  force = false,
 ): Promise<void> {
   const entry = store.getEntryByTopic(topicId);
-  if (!entry || entry.type !== ThreadType.User || entry.name === displayName) return;
+  if (!entry || entry.type !== ThreadType.User) return;
+  if (!force && entry.name === displayName) return;
 
   const nextName = topicName(displayName, ThreadType.User);
   try {
     await tg.editForumTopic(config.telegram.groupId, topicId, { name: nextName });
     store.updateName(topicId, displayName);
-    console.log(`[Zalo→TG] Renamed DM topic for ${zaloId}: "${entry.name}" → "${displayName}"`);
+    console.log(`[Zalo→TG] Renamed DM topic for ${zaloId}: "${entry.name}" → "${displayName}"${force ? ' (forced)' : ''}`);
   } catch (err) {
     if (isTopicDeletedError(err)) throw err;
     console.warn(`[Zalo→TG] Failed to rename DM topic ${topicId} for ${zaloId}:`, err);
@@ -388,9 +390,9 @@ export async function syncDmTopicNamesFromCache(): Promise<{ checked: number; re
     if (entry.type !== ThreadType.User) continue;
     checked += 1;
     const preferred = nameCache.preferred(entry.zaloId);
-    if (!preferred || preferred === entry.name) continue;
+    if (!preferred) continue;
     try {
-      await maybeRenameExistingDmTopic(entry.topicId, entry.zaloId, preferred);
+      await maybeRenameExistingDmTopic(entry.topicId, entry.zaloId, preferred, true);
       renamed += 1;
     } catch (err) {
       failed += 1;
