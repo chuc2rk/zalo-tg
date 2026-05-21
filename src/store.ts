@@ -322,7 +322,27 @@ export const msgStore = {
       }
       _zaloToTg.set(id, tgMsgId);
     }
-    _tgToQuote.set(tgMsgId, quote);
+    const existingQuote = _tgToQuote.get(tgMsgId);
+    const isRichQuote = (q: ZaloQuoteData | undefined): boolean => Boolean(q && (q.msgType !== 'webchat' || typeof q.content !== 'string'));
+    const hasConfirmedCli = (q: ZaloQuoteData | undefined): boolean => Boolean(q?.cliMsgId && q.cliMsgId !== '0');
+    const mergeQuotes = (older: ZaloQuoteData, newer: ZaloQuoteData): ZaloQuoteData => {
+      const rich = isRichQuote(newer) && !isRichQuote(older) ? newer : older;
+      const cliSource = hasConfirmedCli(newer) ? newer : (hasConfirmedCli(older) ? older : newer);
+      return {
+        ...rich,
+        msgId: cliSource.msgId || rich.msgId,
+        cliMsgId: cliSource.cliMsgId || rich.cliMsgId,
+        ts: cliSource.ts || rich.ts,
+        ttl: newer.ttl ?? rich.ttl,
+        zaloId: newer.zaloId || rich.zaloId,
+        threadType: newer.threadType,
+      };
+    };
+    const incomingIsPlaceholder = (!quote.cliMsgId || quote.cliMsgId === '0') && quote.msgType === 'webchat';
+    const existingIsBetterRich = isRichQuote(existingQuote) && hasConfirmedCli(existingQuote);
+    if (!incomingIsPlaceholder || !existingIsBetterRich) {
+      _tgToQuote.set(tgMsgId, existingQuote ? mergeQuotes(existingQuote, quote) : quote);
+    }
 
     // If the Zalo self-echo arrived before this save (common for fast media/file
     // sends), hydrate the quote now so future TG replies still have cliMsgId and
@@ -354,6 +374,21 @@ export const msgStore = {
   /** Get the Zalo quote data for a given Telegram message_id (for TG→Zalo replies). */
   getQuote(tgMsgId: number): ZaloQuoteData | undefined {
     return _tgToQuote.get(tgMsgId);
+  },
+
+  /** Find a nearby rich attachment quote for wrapper/placeholder Telegram messages. */
+  findNearbyRichQuote(tgMsgId: number, current?: ZaloQuoteData): { tgMsgId: number; quote: ZaloQuoteData } | undefined {
+    const window = 3;
+    const sameThread = (q: ZaloQuoteData): boolean => !current || (q.zaloId === current.zaloId && q.threadType === current.threadType);
+    for (let delta = 1; delta <= window; delta++) {
+      for (const candidateId of [tgMsgId - delta, tgMsgId + delta]) {
+        const q = _tgToQuote.get(candidateId);
+        if (!q || !sameThread(q)) continue;
+        const isRich = q.msgType !== 'webchat' || typeof q.content !== 'string';
+        if (isRich && q.cliMsgId && q.cliMsgId !== '0') return { tgMsgId: candidateId, quote: q };
+      }
+    }
+    return undefined;
   },
 
   /**

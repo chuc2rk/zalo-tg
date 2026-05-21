@@ -2160,8 +2160,21 @@ export function setupTelegramHandler(
     if (tgMsgId === undefined) return undefined;
     const fromMsgStore = msgStore.getQuote(tgMsgId);
     if (fromMsgStore) {
-      // cliMsgId is empty/"0" while waiting for the Zalo echo to confirm it
+      // cliMsgId is empty/"0" while waiting for the Zalo echo to confirm it.
+      // For forwarded file/media wrappers we may already have a rich native quote
+      // payload; use msgId/nearby rich fallback instead of dropping the quote.
       if (!fromMsgStore.cliMsgId || fromMsgStore.cliMsgId === '0') {
+        const isRichPayload = typeof fromMsgStore.content !== 'string' || fromMsgStore.msgType !== 'webchat';
+        if (isRichPayload && fromMsgStore.msgId) {
+          const quote = { ...fromMsgStore, cliMsgId: fromMsgStore.msgId };
+          console.log(`[TG→Zalo] getZaloQuote: rich quote tgMsgId=${tgMsgId} missing cliMsgId; using msgId fallback msgId=${quote.msgId}`);
+          return quote;
+        }
+        const nearby = msgStore.findNearbyRichQuote(tgMsgId, fromMsgStore);
+        if (nearby) {
+          console.log(`[TG→Zalo] getZaloQuote: wrapper tgMsgId=${tgMsgId} has empty cliMsgId; using nearby rich quote tgMsgId=${nearby.tgMsgId} msgId=${nearby.quote.msgId} cliMsgId=${nearby.quote.cliMsgId}`);
+          return nearby.quote;
+        }
         console.log(`[TG→Zalo] getZaloQuote: found in msgStore but cliMsgId not yet confirmed (${fromMsgStore.cliMsgId}) — skipping quote for tgMsgId=${tgMsgId}`);
         return undefined;
       }
