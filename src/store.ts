@@ -328,12 +328,24 @@ export const msgStore = {
       _zaloToTg.set(id, tgMsgId);
     }
     const existingQuote = _tgToQuote.get(tgMsgId);
+    const isRich = (q: ZaloQuoteData | undefined): boolean => Boolean(q && (q.msgType !== 'webchat' || typeof q.content !== 'string'));
+    const hasCli = (q: ZaloQuoteData | undefined): boolean => Boolean(q?.cliMsgId && q.cliMsgId !== '0');
+    const mergeQuotes = (a: ZaloQuoteData, b: ZaloQuoteData): ZaloQuoteData => {
+      const richer = isRich(b) && !isRich(a) ? b : a;
+      const cliSource = hasCli(b) ? b : a;
+      return {
+        ...richer,
+        cliMsgId: cliSource.cliMsgId || richer.cliMsgId,
+        // Prefer the real Zalo msgId that pairs with the confirmed cliMsgId.
+        msgId: hasCli(b) ? b.msgId : richer.msgId,
+        ts: hasCli(b) ? b.ts : richer.ts,
+      };
+    };
+
     const isPlaceholderQuote = (!quote.cliMsgId || quote.cliMsgId === '0') && quote.msgType === 'webchat';
-    const hasRicherExistingQuote = existingQuote !== undefined
-      && Boolean(existingQuote.cliMsgId && existingQuote.cliMsgId !== '0')
-      && (existingQuote.msgType !== 'webchat' || typeof existingQuote.content !== 'string');
+    const hasRicherExistingQuote = existingQuote !== undefined && hasCli(existingQuote) && isRich(existingQuote);
     if (!isPlaceholderQuote || !hasRicherExistingQuote) {
-      _tgToQuote.set(tgMsgId, quote);
+      _tgToQuote.set(tgMsgId, existingQuote ? mergeQuotes(existingQuote, quote) : quote);
     }
     _scheduleMsgPersist();
   },
@@ -346,6 +358,32 @@ export const msgStore = {
   /** Get the Zalo quote data for a given Telegram message_id (for TG→Zalo replies). */
   getQuote(tgMsgId: number): ZaloQuoteData | undefined {
     return _tgToQuote.get(tgMsgId);
+  },
+
+  /**
+   * Telegram/Zalo forwards of files can create a small wrapper message first
+   * (e.g. "Bạn", "Thuý Ng") with msgId but no cliMsgId, followed by the
+   * actual file/media message. When a user replies to that wrapper, use a
+   * nearby richer quote from the same Zalo conversation instead of dropping
+   * the quote preview entirely.
+   */
+  findNearbyRichQuote(tgMsgId: number, baseQuote: ZaloQuoteData, radius = 4): { tgMsgId: number; quote: ZaloQuoteData } | undefined {
+    const isRichQuote = (quote: ZaloQuoteData): boolean => {
+      if (!quote.cliMsgId || quote.cliMsgId === '0') return false;
+      if (quote.zaloId !== baseQuote.zaloId || quote.threadType !== baseQuote.threadType) return false;
+      // Prefer file/image/link object payloads. Some TG-originated file echoes
+      // persist as msgType=webchat with filename string, so allow non-text
+      // message types too, but avoid plain text neighbours.
+      return typeof quote.content !== 'string' || quote.msgType !== 'webchat';
+    };
+
+    for (let offset = 1; offset <= radius; offset++) {
+      for (const candidateTgId of [tgMsgId + offset, tgMsgId - offset]) {
+        const quote = _tgToQuote.get(candidateTgId);
+        if (quote && isRichQuote(quote)) return { tgMsgId: candidateTgId, quote };
+      }
+    }
+    return undefined;
   },
 
   /**
@@ -760,7 +798,19 @@ export const sentMsgStore = {
       if (!_zaloToTg.has(id)) _msgKeyOrder.push(id);
       _zaloToTg.set(id, tgMsgId);
     }
-    _tgToQuote.set(tgMsgId, quote);
+    const existingQuote = _tgToQuote.get(tgMsgId);
+    if (existingQuote && (existingQuote.msgType !== 'webchat' || typeof existingQuote.content !== 'string') && (quote.msgType === 'webchat' || typeof quote.content === 'string')) {
+      _tgToQuote.set(tgMsgId, {
+        ...existingQuote,
+        msgId: quote.msgId,
+        cliMsgId: quote.cliMsgId || existingQuote.cliMsgId,
+        ts: quote.ts || existingQuote.ts,
+      });
+    } else if (existingQuote && (quote.msgType !== 'webchat' || typeof quote.content !== 'string') && (!quote.cliMsgId || quote.cliMsgId === '0') && existingQuote.cliMsgId && existingQuote.cliMsgId !== '0') {
+      _tgToQuote.set(tgMsgId, { ...quote, msgId: existingQuote.msgId, cliMsgId: existingQuote.cliMsgId, ts: existingQuote.ts || quote.ts });
+    } else {
+      _tgToQuote.set(tgMsgId, quote);
+    }
     _scheduleMsgPersist();
   },
 

@@ -1,4 +1,4 @@
-import { ThreadType, type AttachmentSource } from 'zca-js';
+import { ThreadType, type AttachmentSource, type UploadAttachmentType } from 'zca-js';
 import type { Context } from 'telegraf';
 import path from 'path';
 import { createReadStream } from 'fs';
@@ -2153,8 +2153,24 @@ export function setupTelegramHandler(
     if (tgMsgId === undefined) return undefined;
     const fromMsgStore = msgStore.getQuote(tgMsgId);
     if (fromMsgStore) {
-      // cliMsgId is empty/"0" while waiting for the Zalo echo to confirm it
+      // cliMsgId is empty/"0" while waiting for the Zalo echo to confirm it.
+      // A common forward-file pattern creates either:
+      //   1) a wrapper message with empty cliMsgId before the real file/media, or
+      //   2) a rich file quote whose self-echo cliMsgId was not captured yet.
+      // For rich file/media payloads, using msgId as qmsgCliId is good enough in
+      // practice and avoids dropping the native file preview entirely.
       if (!fromMsgStore.cliMsgId || fromMsgStore.cliMsgId === '0') {
+        const isRichPayload = typeof fromMsgStore.content !== 'string' || fromMsgStore.msgType !== 'webchat';
+        if (isRichPayload) {
+          const quote = { ...fromMsgStore, cliMsgId: fromMsgStore.msgId };
+          console.log(`[TG→Zalo] getZaloQuote: rich quote tgMsgId=${tgMsgId} missing cliMsgId; using msgId fallback msgId=${quote.msgId}`);
+          return quote;
+        }
+        const nearby = msgStore.findNearbyRichQuote(tgMsgId, fromMsgStore);
+        if (nearby) {
+          console.log(`[TG→Zalo] getZaloQuote: wrapper tgMsgId=${tgMsgId} has empty cliMsgId; using nearby rich quote tgMsgId=${nearby.tgMsgId} msgId=${nearby.quote.msgId} cliMsgId=${nearby.quote.cliMsgId}`);
+          return nearby.quote;
+        }
         console.log(`[TG→Zalo] getZaloQuote: found in msgStore but cliMsgId not yet confirmed (${fromMsgStore.cliMsgId}) — skipping quote for tgMsgId=${tgMsgId}`);
         return undefined;
       }
@@ -2384,7 +2400,8 @@ export function setupTelegramHandler(
             }];
           }
 
-          const sendResult = await api.sendMessage(
+          let uploadedForQuote: UploadAttachmentType[] | undefined;
+          const sendMessageAttachmentSource = async () => api.sendMessage(
             {
               msg: effectiveCaption,
               attachments: attachmentSource,
@@ -2393,7 +2410,9 @@ export function setupTelegramHandler(
             },
             zaloId,
             threadType,
-          ).catch(async (err: unknown) => {
+          );
+
+          const sendResult = await sendMessageAttachmentSource().catch(async (err: unknown) => {
             // Code 114 with quote: quote data incompatible with this message type.
             // Retry without quote so the attachment still goes through.
             if ((err as { code?: number })?.code === 114) {
@@ -2413,20 +2432,52 @@ export function setupTelegramHandler(
 
           const zaloMsgId = sendResult?.message?.msgId ?? sendResult?.attachment?.[0]?.msgId;
           if (zaloMsgId !== undefined) {
-sentMsgStore.save(msg.message_id, { msgIds: [zaloMsgId], zaloId, threadType });
-          const ownUid = String(api.getOwnId?.() ?? '');
-          msgStore.save(msg.message_id, [String(zaloMsgId)], {
-            msgId: String(zaloMsgId),
-            cliMsgId: '',
-            uidFrom: ownUid,
-            ts: String(Math.floor(Date.now() / 1000)),
-            msgType: 'webchat',
-            content: caption ?? '',
-            ttl: 0,
-            zaloId,
-            threadType: entry.type,
-          });
-        }
+            sentMsgStore.save(msg.message_id, { msgIds: [zaloMsgId], zaloId, threadType });
+            const ownUid = String(api.getOwnId?.() ?? '');
+            const ext = path.extname(filename).slice(1).toLowerCase();
+            const isGenericFile = !['jpg', 'jpeg', 'png', 'webp', 'gif', 'mp4'].includes(ext);
+            const buildFallbackFileQuoteContent = async (): Promise<string | Record<string, unknown>> => {
+              if (!isGenericFile) return caption ?? '';
+              try {
+                const uploads = uploadedForQuote ?? await api.uploadAttachment(attachmentSource, zaloId, threadType);
+                uploadedForQuote = uploads;
+                const uploaded = uploads[0];
+                if (uploaded?.fileType === 'others' || uploaded?.fileType === 'video') {
+                  return {
+                    title: uploaded.fileName,
+                    description: '',
+                    href: uploaded.fileUrl,
+                    thumb: '',
+                    childnumber: 0,
+                    action: '',
+                    params: JSON.stringify({
+                      fileSize: String(uploaded.totalSize),
+                      checksum: uploaded.checksum,
+                      checksumSha: 'null',
+                      fileExt: ext,
+                      fdata: '{}',
+                      fType: 1,
+                    }),
+                    type: '',
+                  };
+                }
+              } catch (quoteErr) {
+                console.warn(`[TG→Zalo] Could not build rich file quote metadata for ${filename}:`, quoteErr);
+              }
+              return caption || filename;
+            };
+            msgStore.save(msg.message_id, [String(zaloMsgId)], {
+              msgId: String(zaloMsgId),
+              cliMsgId: '',
+              uidFrom: ownUid,
+              ts: String(Math.floor(Date.now() / 1000)),
+              msgType: isGenericFile ? 'share.file' : 'webchat',
+              content: await buildFallbackFileQuoteContent(),
+              ttl: 0,
+              zaloId,
+              threadType: entry.type,
+            });
+          }
           console.log(`[TG→Zalo] Send OK: ${filename}`);
         } catch (err) {
           await notifyError(`sendAttachment(${filename})`, err);
