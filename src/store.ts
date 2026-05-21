@@ -162,6 +162,8 @@ interface MsgMapV2 {
 }
 type MsgMapFile = MsgMapV1 | MsgMapV2;
 
+type QuoteEchoPatch = Partial<Pick<ZaloQuoteData, 'msgId' | 'cliMsgId' | 'msgType' | 'content' | 'ts' | 'ttl'>>;
+
 interface MsgMapData {
   pairs:  [string, number][];
   quotes: [number, ZaloQuoteData][];
@@ -204,6 +206,8 @@ function _loadMsgMap(): MsgMapData {
     return { pairs: v1.pairs.filter(([k]) => k && k !== '0'), quotes: v1.quotes };
   } catch { return { pairs: [], quotes: [] }; }
 }
+
+const _pendingQuoteEchoById = new Map<string, QuoteEchoPatch>();
 
 let _msgPersistTimer: ReturnType<typeof setTimeout> | null = null;
 function _scheduleMsgPersist(): void {
@@ -319,6 +323,17 @@ export const msgStore = {
       _zaloToTg.set(id, tgMsgId);
     }
     _tgToQuote.set(tgMsgId, quote);
+
+    // If the Zalo self-echo arrived before this save (common for fast media/file
+    // sends), hydrate the quote now so future TG replies still have cliMsgId and
+    // native Zalo quote previews.
+    for (const id of validIds) {
+      const pending = _pendingQuoteEchoById.get(id);
+      if (!pending) continue;
+      Object.assign(quote, pending);
+      _pendingQuoteEchoById.delete(id);
+    }
+
     _scheduleMsgPersist();
   },
 
@@ -346,6 +361,20 @@ export const msgStore = {
     if (!quote) return;
     Object.assign(quote, patch);
     _scheduleMsgPersist();
+  },
+
+
+  /**
+   * Store echo metadata when a Zalo self-echo beats the TG→Zalo send response.
+   * msgStore.save() consumes this by msgId/realMsgId/cliMsgId later.
+   */
+  rememberPendingQuoteEcho(zaloMsgIds: string[], patch: QuoteEchoPatch): void {
+    const validIds = zaloMsgIds.filter(id => id && id !== '0');
+    for (const id of validIds) _pendingQuoteEchoById.set(id, patch);
+    // Avoid unbounded growth if a send fails before save().
+    setTimeout(() => {
+      for (const id of validIds) _pendingQuoteEchoById.delete(id);
+    }, 60_000);
   },
 
   /**

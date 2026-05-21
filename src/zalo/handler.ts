@@ -621,17 +621,27 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
             ? msgStore.getTgMsgId(msg.data.cliMsgId)
             : undefined);
 
+        const { text: _echoText, media: _echoMedia } = parseContent(msg.data.content);
+        const _echoContent = _echoText !== null ? _echoText : (_echoMedia as Record<string, unknown>);
+        const _echoPatch = {
+          msgId: msg.data.msgId || msg.data.realMsgId || '',
+          cliMsgId: msg.data.cliMsgId ?? '',
+          msgType: msg.data.msgType ?? ZALO_MSG_TYPES.TEXT,
+          content: _echoContent,
+          ts: msg.data.ts,
+          ttl: msg.data.ttl ?? 0,
+        };
+
         if (_tgId !== undefined) {
-          const { text: _echoText, media: _echoMedia } = parseContent(msg.data.content);
-          const _echoContent = _echoText !== null ? _echoText : (_echoMedia as Record<string, unknown>);
-          msgStore.updateQuoteFromEcho(_tgId, {
-            msgId: msg.data.msgId || msg.data.realMsgId || '',
-            cliMsgId: msg.data.cliMsgId ?? '',
-            msgType: msg.data.msgType ?? ZALO_MSG_TYPES.TEXT,
-            content: _echoContent,
-            ts: msg.data.ts,
-            ttl: msg.data.ttl ?? 0,
-          });
+          msgStore.updateQuoteFromEcho(_tgId, _echoPatch);
+        } else {
+          // Echo can arrive before TG→Zalo sendMessage resolves/saves the mapping.
+          // Keep it briefly and let msgStore.save() hydrate the quote later.
+          msgStore.rememberPendingQuoteEcho([
+            msg.data.msgId,
+            msg.data.realMsgId ?? '',
+            msg.data.cliMsgId ?? '',
+          ], _echoPatch);
         }
 
         // If this msgId is already tracked in sentMsgStore OR we're in the
