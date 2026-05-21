@@ -12,7 +12,7 @@ import { config } from '../config.js';
 import { downloadToTemp, cleanTemp } from '../utils/media.js';
 import { applyZaloMarkupHtml, formatGroupMsgHtml, formatGroupMsg, groupCaption, topicName, truncate, escapeHtml } from '../utils/format.js';
 import type { ZaloStyle } from '../utils/format.js';
-import { msgStore, userCache, pollStore, sentMsgStore, zaloAlbumStore, reactionEchoStore, reactionSummaryStore, reactionEventDedupeStore, aliasCache, friendsCache, recentlyRecalledMsgIds, type ZaloQuoteData } from '../store.js';
+import { msgStore, userCache, pollStore, sentMsgStore, zaloAlbumStore, reactionEchoStore, reactionSummaryStore, reactionEventDedupeStore, aliasCache, friendsCache, nameCache, recentlyRecalledMsgIds, type ZaloQuoteData } from '../store.js';
 import { tgQueue } from '../utils/tgQueue.js';
 
 // Proxy that routes every tg.* call through the rate-limit queue
@@ -242,19 +242,60 @@ async function isMutedZaloGroup(api: ZaloAPI, groupId: string): Promise<boolean>
 // many messages arrive concurrently for the same conversation (e.g. 20-photo album).
 const _pendingTopics = new Map<string, Promise<number>>();
 const _pendingUserNameLookups = new Map<string, Promise<string>>();
+const _deferredNameResolveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const _deferredNameResolveAttempts = new Map<string, number>();
+
+function scheduleDeferredNameResolve(api: ZaloAPI, uid: string): void {
+  const cleanUid = uid.trim();
+  if (!cleanUid || _deferredNameResolveTimers.has(cleanUid)) return;
+  const attempts = _deferredNameResolveAttempts.get(cleanUid) ?? 0;
+  if (attempts >= 3) return;
+
+  // Back off instead of hammering Zalo after a 221/rate-limit window.
+  const delayMs = [120_000, 300_000, 900_000][attempts] ?? 900_000;
+  const timer = setTimeout(async () => {
+    _deferredNameResolveTimers.delete(cleanUid);
+    _deferredNameResolveAttempts.set(cleanUid, attempts + 1);
+    try {
+      const before = nameCache.preferred(cleanUid);
+      const resolved = await resolveUserDisplayName(api, cleanUid);
+      const after = nameCache.preferred(cleanUid, resolved);
+      if (after && after !== cleanUid && after !== before) {
+        console.log(`[Zalo] Deferred name resolve succeeded for ${cleanUid}: ${after}`);
+        const topicId = store.getTopicByZalo(cleanUid, ThreadType.User);
+        if (topicId !== undefined) await maybeRenameExistingDmTopic(topicId, cleanUid, after);
+      } else if (!after || after === cleanUid) {
+        scheduleDeferredNameResolve(api, cleanUid);
+      }
+    } catch (err) {
+      console.warn(`[Zalo] Deferred name resolve failed for ${cleanUid}:`, err instanceof Error ? err.message : err);
+      scheduleDeferredNameResolve(api, cleanUid);
+    }
+  }, delayMs);
+  _deferredNameResolveTimers.set(cleanUid, timer);
+}
 
 async function resolveUserDisplayName(api: ZaloAPI, uid: string | undefined, fallback = 'ai đó'): Promise<string> {
   const cleanUid = uid?.trim();
   if (!cleanUid) return fallback;
 
+  const persistentName = nameCache.preferred(cleanUid);
+  if (persistentName) return persistentName;
+
   const friend = friendsCache.get(cleanUid);
   const contactName = friend?.alias?.trim()
     || friend?.displayName?.trim()
     || aliasCache.get(cleanUid)?.trim();
-  if (contactName) return contactName;
+  if (contactName) {
+    nameCache.mergeContacts([{ userId: cleanUid, alias: friend?.alias, displayName: contactName }]);
+    return contactName;
+  }
 
   const cached = userCache.getName(cleanUid);
-  if (cached?.trim()) return cached;
+  if (cached?.trim()) {
+    nameCache.mergeProfiles([{ userId: cleanUid, displayName: cached }]);
+    return cached;
+  }
 
   const inFlight = _pendingUserNameLookups.get(cleanUid);
   if (inFlight) return inFlight;
@@ -272,6 +313,7 @@ async function resolveUserDisplayName(api: ZaloAPI, uid: string | undefined, fal
       const appName = p?.displayName?.trim() || p?.zaloName?.trim();
       if (appName) {
         userCache.save(cleanUid, appName);
+        nameCache.mergeProfiles([{ userId: cleanUid, displayName: appName }]);
         return appName;
       }
     } catch (err) {
@@ -293,6 +335,7 @@ async function resolveUserDisplayName(api: ZaloAPI, uid: string | undefined, fal
       const name = profile?.displayName?.trim() || profile?.zaloName?.trim();
       if (name) {
         userCache.save(cleanUid, name);
+        nameCache.mergeProfiles([{ userId: cleanUid, displayName: name }]);
         return name;
       }
     } catch (err) {
@@ -301,7 +344,9 @@ async function resolveUserDisplayName(api: ZaloAPI, uid: string | undefined, fal
 
     // Prefer the caller-supplied fallback (e.g. senderName from message data)
     // over the raw UID — only use UID when no real name is available at all.
-    return (fallback && fallback !== 'ai đó') ? fallback : (cleanUid || fallback);
+    const fallbackName = (fallback && fallback !== 'ai đó') ? fallback : (cleanUid || fallback);
+    if (!fallbackName || fallbackName === cleanUid) scheduleDeferredNameResolve(api, cleanUid);
+    return fallbackName;
   })();
 
   _pendingUserNameLookups.set(cleanUid, lookup);
@@ -500,16 +545,24 @@ const _memberCacheLoaded = new Set<string>();
 const _inFlightMsgIds = new Set<string>();
 
 export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
-  // Pre-populate userCache for all existing group topics on startup.
-  // Stagger calls by 2 s each to avoid triggering the rate limiter (code 221).
-  const startupGroups = store.all().filter(e => e.type === 1 /* Group */);
-  for (const entry of startupGroups) {
-    _memberCacheLoaded.add(entry.zaloId);
+  // Warm only a small slice of existing group topics on startup. Older code
+  // tried to preload every mapped group and marked all of them as loaded before
+  // the API calls actually succeeded; accounts in many large groups could hit
+  // Zalo 221 / retry-limit immediately and then never lazy-retry those groups.
+  // Leave unscheduled groups out of _memberCacheLoaded so the first live message
+  // can lazy-load them later.
+  const allStartupGroups = store.all().filter(e => e.type === 1 /* Group */);
+  const startupGroups = allStartupGroups.slice(0, config.zalo.startupMemberPreloadMax);
+  if (allStartupGroups.length > startupGroups.length) {
+    console.log(`[Zalo] Startup member-cache warmup limited to ${startupGroups.length}/${allStartupGroups.length} groups; remaining groups lazy-load on first message`);
   }
   void (async () => {
     for (let i = 0; i < startupGroups.length; i++) {
-      if (i > 0) await new Promise(r => setTimeout(r, 0));
-      void populateGroupMemberCache(api, startupGroups[i].zaloId);
+      if (i > 0) await new Promise(r => setTimeout(r, config.zalo.startupMemberPreloadDelayMs));
+      const groupId = startupGroups[i].zaloId;
+      if (_memberCacheLoaded.has(groupId)) continue;
+      _memberCacheLoaded.add(groupId);
+      void populateGroupMemberCache(api, groupId);
     }
   })();
 
@@ -539,6 +592,10 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         // zca-js User.displayName is the logged-in account's address-book label.
         // zaloName is the public profile name. Do NOT overwrite displayName with
         // getAliasList-only aliases, or we lose saved contact names such as "Tỷ cưng".
+        displayName: (f.displayName || f.zaloName || f.username || f.userId).trim(),
+      })));
+      nameCache.mergeContacts(friends.map(f => ({
+        userId: f.userId,
         displayName: (f.displayName || f.zaloName || f.username || f.userId).trim(),
       })));
       friendCount = friends.length;

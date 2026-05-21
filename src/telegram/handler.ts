@@ -37,7 +37,7 @@ import { promisify } from 'util';
 const execFileAsync = promisify(execFile);
 
 import type { ZaloAPI } from '../zalo/types.js';
-import { store, msgStore, userCache, friendsCache, groupsCache, sentMsgStore, pollStore, mediaGroupStore, reactionEchoStore, reactionSummaryStore, reactionEventDedupeStore, aliasCache, markRecalled, type ZaloQuoteData } from '../store.js';
+import { store, msgStore, userCache, friendsCache, groupsCache, sentMsgStore, pollStore, mediaGroupStore, reactionEchoStore, reactionSummaryStore, reactionEventDedupeStore, aliasCache, nameCache, markRecalled, type ZaloQuoteData } from '../store.js';
 import { tgBot } from './bot.js';
 import { config } from '../config.js';
 import { downloadToTemp, cleanTemp, convertToM4a, extractVideoThumbnail, convertWebmToGif } from '../utils/media.js';
@@ -427,7 +427,10 @@ export function setupTelegramHandler(
     const topicId = 'message_thread_id' in ctx.message
       ? (ctx.message.message_thread_id as number | undefined)
       : undefined;
-    const arg = (ctx.message.text ?? '').split(/\s+/)[1]?.toLowerCase() ?? '';
+    const text = ctx.message.text ?? '';
+    const parts = text.trim().split(/\s+/);
+    const arg = parts[1]?.toLowerCase() ?? '';
+    const rest = parts.slice(2).join(' ').trim();
     const replyOpts = topicId ? { message_thread_id: topicId } : {};
 
     if (arg === 'list' || !arg) {
@@ -470,6 +473,28 @@ export function setupTelegramHandler(
       return;
     }
 
+    if (arg === 'rename') {
+      const entry = store.getEntryByTopic(topicId);
+      if (!entry) {
+        await ctx.telegram.sendMessage(config.telegram.groupId, '❌ Topic này chưa được map.', replyOpts);
+        return;
+      }
+      if (!rest) {
+        await ctx.telegram.sendMessage(config.telegram.groupId, '⚠️ Dùng: <code>/topic rename Tên mới</code>', { ...replyOpts, parse_mode: 'HTML' });
+        return;
+      }
+      try {
+        const prefix = entry.type === 1 ? '👥' : '👤';
+        await ctx.telegram.editForumTopic(config.telegram.groupId, topicId, { name: `${prefix} ${rest}`.slice(0, 128) });
+        store.updateName(topicId, rest);
+        if (entry.type === 0) nameCache.setManualAlias(entry.zaloId, rest);
+        await ctx.telegram.sendMessage(config.telegram.groupId, `✅ Đã đổi tên topic thành <b>${escapeHtml(rest)}</b>.`, { ...replyOpts, parse_mode: 'HTML' });
+      } catch (err) {
+        await ctx.telegram.sendMessage(config.telegram.groupId, `❌ Không đổi được tên topic: <code>${escapeHtml(err instanceof Error ? err.message : String(err))}</code>`, { ...replyOpts, parse_mode: 'HTML' });
+      }
+      return;
+    }
+
     if (arg === 'delete') {
       const removed = store.remove(topicId);
       if (!removed) {
@@ -487,6 +512,47 @@ export function setupTelegramHandler(
     await ctx.telegram.sendMessage(
       config.telegram.groupId,
       '❓ Dùng: <code>/topic list</code> | <code>/topic info</code> | <code>/topic delete</code>',
+      { ...replyOpts, parse_mode: 'HTML' },
+    );
+  });
+
+  // /alias — set a persistent preferred name for the current DM topic.
+  // Usage inside a DM topic: /alias Ly(KHKT)
+  tgBot.command('alias', async (ctx) => {
+    if (ctx.chat.id !== config.telegram.groupId) return;
+    const topicId = 'message_thread_id' in ctx.message
+      ? (ctx.message.message_thread_id as number | undefined)
+      : undefined;
+    const replyOpts = topicId ? { message_thread_id: topicId } : {};
+    if (!topicId) {
+      await ctx.telegram.sendMessage(config.telegram.groupId, '⚠️ Hãy gửi <code>/alias Tên</code> trong DM topic cần đặt tên.', { ...replyOpts, parse_mode: 'HTML' });
+      return;
+    }
+    const alias = (ctx.message.text ?? '').replace(/^\/alias(?:@\w+)?\s*/i, '').trim();
+    if (!alias) {
+      await ctx.telegram.sendMessage(config.telegram.groupId, '⚠️ Dùng: <code>/alias Ly(KHKT)</code>', { ...replyOpts, parse_mode: 'HTML' });
+      return;
+    }
+    const entry = store.getEntryByTopic(topicId);
+    if (!entry) {
+      await ctx.telegram.sendMessage(config.telegram.groupId, '❌ Topic này chưa được map.', replyOpts);
+      return;
+    }
+    if (entry.type !== 0) {
+      await ctx.telegram.sendMessage(config.telegram.groupId, '⚠️ /alias chỉ dùng cho DM topic, không dùng cho nhóm.', replyOpts);
+      return;
+    }
+    nameCache.setManualAlias(entry.zaloId, alias);
+    userCache.save(entry.zaloId, alias);
+    try {
+      await ctx.telegram.editForumTopic(config.telegram.groupId, topicId, { name: `👤 ${alias}`.slice(0, 128) });
+      store.updateName(topicId, alias);
+    } catch (err) {
+      console.warn(`[/alias] Failed to rename topic ${topicId}:`, err);
+    }
+    await ctx.telegram.sendMessage(
+      config.telegram.groupId,
+      `✅ Đã lưu tên ưu tiên <b>${escapeHtml(alias)}</b> cho UID <code>${entry.zaloId}</code>.`,
       { ...replyOpts, parse_mode: 'HTML' },
     );
   });
@@ -1908,7 +1974,7 @@ export function setupTelegramHandler(
     let displayName: string | undefined;
     if (!isGroup) {
       // Check alias first
-      displayName = aliasCache.get(entityId);
+      displayName = nameCache.preferred(entityId) || aliasCache.get(entityId);
       if (!displayName) {
         // Fallback: friendsCache, then getUserInfo
         displayName = friendsCache.get(entityId)?.displayName;

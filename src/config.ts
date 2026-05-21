@@ -23,6 +23,13 @@ function envFlag(key: string, defaultValue = false): boolean {
   return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
 }
 
+function envInt(key: string, defaultValue: number): number {
+  const raw = process.env[key];
+  if (raw === undefined || raw.trim() === '') return defaultValue;
+  const parsed = Number.parseInt(raw.trim(), 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : defaultValue;
+}
+
 export const config = {
   telegram: {
     token:       requireEnv('TG_TOKEN'),
@@ -37,6 +44,13 @@ export const config = {
   zalo: {
     credentialsPath: resolvePath(process.env.ZALO_CREDENTIALS_PATH, 'credentials.json'),
     skipMutedGroups: envFlag('ZALO_SKIP_MUTED_GROUPS'),
+    /**
+     * Warm only a small number of already-mapped groups at boot. The rest are
+     * lazy-loaded on first message to avoid Zalo code 221 / retry-limit storms
+     * for accounts that belong to many large groups.
+     */
+    startupMemberPreloadMax: envInt('ZALO_STARTUP_MEMBER_PRELOAD_MAX', 12),
+    startupMemberPreloadDelayMs: envInt('ZALO_STARTUP_MEMBER_PRELOAD_DELAY_MS', 5_000),
   },
   dataDir: resolvePath(process.env.DATA_DIR, 'data'),
 } as const;

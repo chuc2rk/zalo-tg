@@ -514,6 +514,125 @@ export const userCache = {
   },
 };
 
+
+
+// ── Persistent name cache / manual aliases ──────────────────────────────────
+
+interface NameCacheEntry {
+  userId: string;
+  /** Manually preferred/contact name. Highest priority. */
+  alias?: string;
+  /** Address-book display name from getAllFriends/getAliasList. */
+  contactName?: string;
+  /** Public Zalo profile name / group member dName. */
+  profileName?: string;
+  updatedAt: number;
+}
+
+interface NameCacheFile {
+  v: 1;
+  users: Record<string, NameCacheEntry>;
+}
+
+const _nameCacheFile = path.resolve(config.dataDir, 'name-cache.json');
+
+function _loadNameCache(): NameCacheFile {
+  if (!existsSync(_nameCacheFile)) return { v: 1, users: {} };
+  try {
+    const raw = JSON.parse(readFileSync(_nameCacheFile, 'utf8')) as NameCacheFile;
+    return { v: 1, users: raw.users ?? {} };
+  } catch {
+    return { v: 1, users: {} };
+  }
+}
+
+let _nameCache = _loadNameCache();
+let _namePersistTimer: ReturnType<typeof setTimeout> | null = null;
+function _persistNameCacheSoon(): void {
+  if (_namePersistTimer) return;
+  _namePersistTimer = setTimeout(() => {
+    _namePersistTimer = null;
+    try {
+      mkdirSync(path.dirname(_nameCacheFile), { recursive: true });
+      const tmp = _nameCacheFile + '.tmp';
+      writeFileSync(tmp, JSON.stringify(_nameCache, null, 2), 'utf8');
+      renameSync(tmp, _nameCacheFile);
+    } catch (err) {
+      console.warn('[nameCache] Failed to persist:', err);
+    }
+  }, 250);
+}
+
+function _upsertNameCache(userId: string, patch: Partial<Omit<NameCacheEntry, 'userId' | 'updatedAt'>>): NameCacheEntry | undefined {
+  const cleanUid = userId.trim();
+  if (!cleanUid) return undefined;
+  const prev = _nameCache.users[cleanUid] ?? { userId: cleanUid, updatedAt: 0 };
+  const next: NameCacheEntry = { ...prev, updatedAt: Date.now() };
+  if (patch.alias !== undefined) next.alias = patch.alias.trim() || undefined;
+  if (patch.contactName !== undefined) next.contactName = patch.contactName.trim() || undefined;
+  if (patch.profileName !== undefined) next.profileName = patch.profileName.trim() || undefined;
+  _nameCache.users[cleanUid] = next;
+  _persistNameCacheSoon();
+  return next;
+}
+
+export const nameCache = {
+  get(userId: string): NameCacheEntry | undefined {
+    return _nameCache.users[userId.trim()];
+  },
+
+  /** Highest priority label: manual alias/contact name, then public profile, then fallback. */
+  preferred(userId: string, fallback?: string): string | undefined {
+    const e = this.get(userId);
+    return e?.alias?.trim()
+      || e?.contactName?.trim()
+      || e?.profileName?.trim()
+      || fallback?.trim()
+      || undefined;
+  },
+
+  setManualAlias(userId: string, alias: string): void {
+    _upsertNameCache(userId, { alias });
+    aliasCache.merge([{ userId, alias }]);
+  },
+
+  mergeContacts(items: Array<{ userId: string; alias?: string; displayName?: string }>): void {
+    for (const it of items) {
+      const contactName = (it.alias ?? it.displayName)?.trim();
+      if (!contactName) continue;
+      _upsertNameCache(it.userId, { contactName });
+    }
+  },
+
+  mergeProfiles(items: Array<{ userId: string; displayName?: string; profileName?: string }>): void {
+    for (const it of items) {
+      const profileName = (it.displayName ?? it.profileName)?.trim();
+      if (!profileName) continue;
+      _upsertNameCache(it.userId, { profileName });
+    }
+  },
+
+  resolveByName(rawName: string): string | undefined {
+    const norm = _normName(rawName);
+    for (const [uid, e] of Object.entries(_nameCache.users)) {
+      if ((e.alias && _normName(e.alias) === norm)
+        || (e.contactName && _normName(e.contactName) === norm)
+        || (e.profileName && _normName(e.profileName) === norm)) return uid;
+    }
+    return undefined;
+  },
+
+  stats(): { users: number; manualAliases: number; contacts: number; profiles: number } {
+    const entries = Object.values(_nameCache.users);
+    return {
+      users: entries.length,
+      manualAliases: entries.filter(e => Boolean(e.alias?.trim())).length,
+      contacts: entries.filter(e => Boolean(e.contactName?.trim())).length,
+      profiles: entries.filter(e => Boolean(e.profileName?.trim())).length,
+    };
+  },
+};
+
 // ── Alias cache (danh bạ nickname) ───────────────────────────────────────────
 
 /** userId → alias (tên danh bạ người dùng tự đặt) */
@@ -527,6 +646,7 @@ export const aliasCache = {
     _aliasMap.clear();
     _aliasNormToUid.clear();
     this.merge(items);
+    nameCache.mergeContacts(items.map(i => ({ userId: i.userId, alias: i.alias })));
   },
 
   /** Merge aliases/contact display names into the existing cache. */
@@ -536,6 +656,7 @@ export const aliasCache = {
       if (name) {
         _aliasMap.set(userId, name);
         _aliasNormToUid.set(_normName(name), userId);
+        nameCache.mergeContacts([{ userId, alias: name }]);
       }
     }
   },
@@ -547,7 +668,7 @@ export const aliasCache = {
 
   /** Find a Zalo UID by alias name (for TG→Zalo mention via alias). */
   resolveByAlias(rawName: string): string | undefined {
-    return _aliasNormToUid.get(_normName(rawName));
+    return _aliasNormToUid.get(_normName(rawName)) ?? nameCache.resolveByName(rawName);
   },
 
   /** Get alias for a userId, or undefined if not set */
@@ -580,6 +701,7 @@ function upsertAliasFromFriend(friend: ZaloFriend): void {
   if (!preferredName) return;
   _aliasMap.set(friend.userId, preferredName);
   _aliasNormToUid.set(_normName(preferredName), friend.userId);
+  nameCache.mergeContacts([{ userId: friend.userId, alias: friend.alias, displayName: friend.displayName }]);
 }
 
 const FRIENDS_TTL_MS = 5 * 60 * 1000; // 5 minutes
