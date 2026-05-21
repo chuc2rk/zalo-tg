@@ -879,9 +879,10 @@ ${html}`
             const len = Math.min(m.len, safeBody.length - m.pos);
             const originalMentionText = safeBody.slice(m.pos, m.pos + len);
             const resolvedContactName = m.type === 0
-              ? (friendsCache.get(m.uid)?.alias?.trim()
-                || friendsCache.get(m.uid)?.displayName?.trim()
-                || aliasCache.get(m.uid)?.trim())
+              ? (nameCache.preferred(m.uid)
+                || friendsCache.get(m.uid)?.alias?.trim()
+                || aliasCache.get(m.uid)?.trim()
+                || friendsCache.get(m.uid)?.displayName?.trim())
               : undefined;
             // Critical: when someone mentions Chức on Zalo, keep the Telegram
             // username in the forwarded text so Telegram actually triggers a
