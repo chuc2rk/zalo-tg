@@ -241,6 +241,7 @@ async function isMutedZaloGroup(api: ZaloAPI, groupId: string): Promise<boolean>
 // In-flight topic creation promises — prevents duplicate topic creation when
 // many messages arrive concurrently for the same conversation (e.g. 20-photo album).
 const _pendingTopics = new Map<string, Promise<number>>();
+const ZALO_DM_MENTION = process.env.ZALO_DM_MENTION?.trim() || '@chuc2rk';
 const _pendingUserNameLookups = new Map<string, Promise<string>>();
 const _deferredNameResolveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const _deferredNameResolveAttempts = new Map<string, number>();
@@ -790,7 +791,15 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         tgBase.reply_parameters = { message_id: tgReplyMsgId, allow_sending_without_reply: true };
       }
 
-      const caption = groupCaption(bridgeSenderName);
+      // Preserve the old DM notification behavior: any incoming Zalo DM is
+      // forwarded inside its Telegram topic with @chuc2rk prefixed, so Telegram
+      // actually alerts Chức even when the topic/chat is otherwise muted.
+      const shouldMentionDm = type === ThreadType.User && !msg.isSelf;
+      const withDmMention = (html: string): string => shouldMentionDm
+        ? `${escapeHtml(ZALO_DM_MENTION)}
+${html}`
+        : html;
+      const caption = withDmMention(groupCaption(bridgeSenderName));
       const tgOpts  = { ...tgBase, parse_mode: 'HTML' as const, caption };
 
       // Build quote data + mapping helper — saved after every successful TG send
@@ -896,7 +905,7 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         const bodyHtml = (safeMentions?.length || safeStyles?.length)
           ? applyZaloMarkupHtml(safeBody, safeMentions, safeStyles)
           : escapeHtml(safeBody);
-        const tgText = formatGroupMsgHtml(bridgeSenderName, bodyHtml);
+        const tgText = withDmMention(formatGroupMsgHtml(bridgeSenderName, bodyHtml));
         const sent = await tg.sendMessage(
           config.telegram.groupId,
           tgText,
