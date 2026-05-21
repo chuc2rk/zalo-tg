@@ -390,9 +390,9 @@ export async function syncDmTopicNamesFromCache(): Promise<{ checked: number; re
     if (entry.type !== ThreadType.User) continue;
     checked += 1;
     const preferred = nameCache.preferred(entry.zaloId);
-    if (!preferred) continue;
+    if (!preferred || preferred === entry.name) continue;
     try {
-      await maybeRenameExistingDmTopic(entry.topicId, entry.zaloId, preferred, true);
+      await maybeRenameExistingDmTopic(entry.topicId, entry.zaloId, preferred);
       renamed += 1;
     } catch (err) {
       failed += 1;
