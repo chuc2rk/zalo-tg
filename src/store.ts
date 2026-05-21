@@ -326,13 +326,22 @@ export const msgStore = {
 
     // If the Zalo self-echo arrived before this save (common for fast media/file
     // sends), hydrate the quote now so future TG replies still have cliMsgId and
-    // native Zalo quote previews.
-    for (const id of validIds) {
-      const pending = _pendingQuoteEchoById.get(id);
-      if (!pending) continue;
-      Object.assign(quote, pending);
-      _pendingQuoteEchoById.delete(id);
-    }
+    // native Zalo quote previews. Attachment sends can produce both a webchat
+    // placeholder (often content = "Bạn") and the real file/photo echo; prefer
+    // the richest/non-webchat patch instead of blindly applying the last one.
+    const pendingPatches = validIds
+      .map(id => ({ id, patch: _pendingQuoteEchoById.get(id) }))
+      .filter((x): x is { id: string; patch: QuoteEchoPatch } => Boolean(x.patch));
+    const patchScore = (patch: QuoteEchoPatch): number => {
+      let score = 0;
+      if (patch.msgType && patch.msgType !== 'webchat') score += 10;
+      if (patch.content && typeof patch.content === 'object') score += 5;
+      if (typeof patch.content === 'string' && patch.content.trim() && patch.content.trim() !== 'Bạn') score += 2;
+      return score;
+    };
+    pendingPatches.sort((a, b) => patchScore(b.patch) - patchScore(a.patch));
+    if (pendingPatches[0]) Object.assign(quote, pendingPatches[0].patch);
+    for (const { id } of pendingPatches) _pendingQuoteEchoById.delete(id);
 
     _scheduleMsgPersist();
   },

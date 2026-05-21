@@ -2413,22 +2413,29 @@ export function setupTelegramHandler(
             throw err;
           }) as { message?: { msgId?: number } | null; attachment?: Array<{ msgId?: number }> };
 
-          const zaloMsgId = sendResult?.message?.msgId ?? sendResult?.attachment?.[0]?.msgId;
-          if (zaloMsgId !== undefined) {
-sentMsgStore.save(msg.message_id, { msgIds: [zaloMsgId], zaloId, threadType });
-          const ownUid = String(api.getOwnId?.() ?? '');
-          msgStore.save(msg.message_id, [String(zaloMsgId)], {
-            msgId: String(zaloMsgId),
-            cliMsgId: '',
-            uidFrom: ownUid,
-            ts: String(Math.floor(Date.now() / 1000)),
-            msgType: 'webchat',
-            content: caption ?? '',
-            ttl: 0,
-            zaloId,
-            threadType: entry.type,
-          });
-        }
+          const attachmentMsgIds = (sendResult?.attachment ?? [])
+            .map(a => a.msgId)
+            .filter((id): id is number => id !== undefined);
+          const messageMsgId = sendResult?.message?.msgId;
+          // For file/photo sends, quote the attachment message, not zca-js' text
+          // placeholder message (which can render as "Bạn" in Zalo quotes).
+          const zaloMsgIds = [...attachmentMsgIds, ...(messageMsgId !== undefined ? [messageMsgId] : [])];
+          const primaryZaloMsgId = zaloMsgIds[0];
+          if (primaryZaloMsgId !== undefined) {
+            sentMsgStore.save(msg.message_id, { msgIds: zaloMsgIds, zaloId, threadType });
+            const ownUid = String(api.getOwnId?.() ?? '');
+            msgStore.save(msg.message_id, zaloMsgIds.map(String), {
+              msgId: String(primaryZaloMsgId),
+              cliMsgId: '',
+              uidFrom: ownUid,
+              ts: String(Math.floor(Date.now() / 1000)),
+              msgType: 'share.file',
+              content: caption || filename,
+              ttl: 0,
+              zaloId,
+              threadType: entry.type,
+            });
+          }
           console.log(`[TG→Zalo] Send OK: ${filename}`);
         } catch (err) {
           await notifyError(`sendAttachment(${filename})`, err);
