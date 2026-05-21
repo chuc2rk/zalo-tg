@@ -855,21 +855,38 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
           ?.filter(s => s.start < safeBody.length)
           .map(s => ({ ...s, len: Math.min(s.len, safeBody.length - s.start) }));
         const ownUid = String(api.getOwnId?.() ?? '');
+        const isOwnMentionLabel = (label: string): boolean => {
+          const norm = label
+            .replace(/^@/, '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .trim()
+            .toLowerCase();
+          return norm === 'chuc' || norm === 'chucnd' || norm === 'chuc2rk' || norm.includes('chuc nguyen');
+        };
         const safeMentions = mentions
           ?.filter(m => m.pos < safeBody.length)
           .map(m => {
             const len = Math.min(m.len, safeBody.length - m.pos);
+            const originalMentionText = safeBody.slice(m.pos, m.pos + len);
+            const resolvedContactName = m.type === 0
+              ? (friendsCache.get(m.uid)?.alias?.trim()
+                || friendsCache.get(m.uid)?.displayName?.trim()
+                || aliasCache.get(m.uid)?.trim())
+              : undefined;
             // Critical: when someone mentions Chức on Zalo, keep the Telegram
             // username in the forwarded text so Telegram actually triggers a
             // notification. Contact-name labels like @Chuc/@Chức render nicely
-            // but do not notify @chuc2rk.
+            // but do not notify @chuc2rk. Some Zalo mention events can carry an
+            // unexpected uid, so also recognise the visible/or resolved label.
             const contactName = m.type === 0
-              ? (m.uid === ownUid
+              ? ((m.uid === ownUid || isOwnMentionLabel(originalMentionText) || (resolvedContactName && isOwnMentionLabel(resolvedContactName)))
                 ? 'chuc2rk'
-                : (friendsCache.get(m.uid)?.alias?.trim()
-                  || friendsCache.get(m.uid)?.displayName?.trim()
-                  || aliasCache.get(m.uid)?.trim()))
+                : resolvedContactName)
               : undefined;
+            if (m.type === 0) {
+              console.log(`[Zalo→TG] mention uid=${m.uid} own=${ownUid} text="${originalMentionText}" label="${contactName ?? ''}"`);
+            }
             return {
               ...m,
               len,
