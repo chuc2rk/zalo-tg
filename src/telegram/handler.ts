@@ -77,6 +77,7 @@ import { promisify } from 'util';
 const execFileAsync = promisify(execFile);
 
 import type { ZaloAPI } from '../zalo/types.js';
+import { syncDmTopicNamesFromCache } from '../zalo/handler.js';
 import { store, msgStore, userCache, friendsCache, groupsCache, sentMsgStore, pollStore, mediaGroupStore, reactionEchoStore, reactionSummaryStore, reactionEventDedupeStore, aliasCache, nameCache, markRecalled, type ZaloQuoteData } from '../store.js';
 import { tgBot } from './bot.js';
 import { config } from '../config.js';
@@ -496,6 +497,24 @@ export function setupTelegramHandler(
         '⚠️ Lệnh này phải được gửi trong một topic cụ thể.',
         replyOpts,
       );
+      return;
+    }
+
+    if (arg === 'syncnames') {
+      try {
+        const res = await syncDmTopicNamesFromCache();
+        await ctx.telegram.sendMessage(
+          config.telegram.groupId,
+          `✅ Sync tên DM topic xong: checked=${res.checked}, renamed=${res.renamed}, failed=${res.failed}`,
+          replyOpts,
+        );
+      } catch (err) {
+        await ctx.telegram.sendMessage(
+          config.telegram.groupId,
+          `❌ Sync tên lỗi: ${err instanceof Error ? err.message : String(err)}`,
+          replyOpts,
+        );
+      }
       return;
     }
 

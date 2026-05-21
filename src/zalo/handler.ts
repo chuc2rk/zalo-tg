@@ -379,6 +379,27 @@ async function maybeRenameExistingDmTopic(
   }
 }
 
+
+export async function syncDmTopicNamesFromCache(): Promise<{ checked: number; renamed: number; failed: number }> {
+  let checked = 0;
+  let renamed = 0;
+  let failed = 0;
+  for (const entry of store.all()) {
+    if (entry.type !== ThreadType.User) continue;
+    checked += 1;
+    const preferred = nameCache.preferred(entry.zaloId);
+    if (!preferred || preferred === entry.name) continue;
+    try {
+      await maybeRenameExistingDmTopic(entry.topicId, entry.zaloId, preferred);
+      renamed += 1;
+    } catch (err) {
+      failed += 1;
+      console.warn(`[Zalo→TG] Failed cache topic-name sync for ${entry.zaloId}:`, err instanceof Error ? err.message : err);
+    }
+  }
+  return { checked, renamed, failed };
+}
+
 async function getOrCreateTopic(
   zaloId: string,
   type: 0 | 1,
