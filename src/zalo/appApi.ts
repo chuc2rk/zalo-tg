@@ -103,6 +103,48 @@ export interface AppGroupData {
   hasMoreMember?: number;
 }
 
+const APP_GROUP_INFO_CACHE_TTL = 60 * 1000;
+const APP_GROUP_INFO_STALE_TTL = 10 * 60 * 1000;
+const APP_GROUP_INFO_MAX_BACKOFF = 5 * 60 * 1000;
+const APP_GROUP_INFO_LOG_THROTTLE = 30 * 1000;
+
+const _appGroupInfoCache = new Map<string, { data: AppGroupData; ts: number }>();
+const _appGroupInfoInflight = new Map<string, Promise<AppGroupData | null>>();
+let _appGroupInfoBackoffUntil = 0;
+let _appGroupInfoBackoffMs = 0;
+let _appGroupInfoLastRetryLogTs = 0;
+
+function getAppGroupInfoCache(groupId: string, ttlMs: number): AppGroupData | null {
+  const hit = _appGroupInfoCache.get(groupId);
+  if (!hit) return null;
+  if (Date.now() - hit.ts > ttlMs) return null;
+  return hit.data;
+}
+
+function putAppGroupInfoCache(groupId: string, data: AppGroupData): void {
+  _appGroupInfoCache.set(groupId, { data, ts: Date.now() });
+}
+
+function bumpAppGroupInfoBackoff(errorMessage: string): void {
+  _appGroupInfoBackoffMs = Math.min(
+    _appGroupInfoBackoffMs > 0 ? _appGroupInfoBackoffMs * 2 : 15_000,
+    APP_GROUP_INFO_MAX_BACKOFF,
+  );
+  _appGroupInfoBackoffUntil = Date.now() + _appGroupInfoBackoffMs;
+  const now = Date.now();
+  if (now - _appGroupInfoLastRetryLogTs >= APP_GROUP_INFO_LOG_THROTTLE) {
+    _appGroupInfoLastRetryLogTs = now;
+    console.warn(
+      `[API][APP] getGroupInfo retry-limited: backing off ${Math.round(_appGroupInfoBackoffMs / 1000)}s (${errorMessage || 'Retry limit'})`,
+    );
+  }
+}
+
+function resetAppGroupInfoBackoff(): void {
+  _appGroupInfoBackoffMs = 0;
+  _appGroupInfoBackoffUntil = 0;
+}
+
 /**
  * Fetch group info from the PC App group domain (group-wpa.zaloapp.com).
  * Mirrors zca-js getGroupInfo but uses the PC App session cookies, which
@@ -114,37 +156,70 @@ export async function appGetGroupInfo(groupId: string): Promise<AppGroupData | n
   const sess = loadAppSession();
   if (!sess) return null;
 
-  const url = `${GROUP_DOMAIN}/api/group/getmg-v2`;
-  const body = { gridVerMap: JSON.stringify({ [groupId]: 0 }) };
-  const encBody = encodeAes(JSON.stringify(body), sess.zpw_enk);
+  const fresh = getAppGroupInfoCache(groupId, APP_GROUP_INFO_CACHE_TTL);
+  if (fresh) return fresh;
 
-  try {
-    const resp = await axios.post<{ error_code: number; data?: string; error_message?: string }>(
-      url,
-      `params=${encodeURIComponent(encBody)}`,
-      {
-        params:  commonParams(sess.imei),
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'User-Agent':   PC_UA,
-          'Cookie':       buildCookieHeader(sess.cookies, url),
+  const getStale = (): AppGroupData | null => getAppGroupInfoCache(groupId, APP_GROUP_INFO_STALE_TTL);
+  if (_appGroupInfoBackoffUntil > Date.now()) {
+    return getStale();
+  }
+
+  const inFlight = _appGroupInfoInflight.get(groupId);
+  if (inFlight) return inFlight;
+
+  const request = (async (): Promise<AppGroupData | null> => {
+    const url = `${GROUP_DOMAIN}/api/group/getmg-v2`;
+    const body = { gridVerMap: JSON.stringify({ [groupId]: 0 }) };
+    const encBody = encodeAes(JSON.stringify(body), sess.zpw_enk);
+
+    try {
+      const resp = await axios.post<{ error_code: number; data?: string; error_message?: string }>(
+        url,
+        `params=${encodeURIComponent(encBody)}`,
+        {
+          params:  commonParams(sess.imei),
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent':   PC_UA,
+            'Cookie':       buildCookieHeader(sess.cookies, url),
+          },
+          timeout: 15_000,
         },
-        timeout: 15_000,
-      },
-    );
+      );
 
-    if (resp.data.error_code !== 0 || !resp.data.data) {
-      console.warn(`[AppApi] getGroupInfo [${resp.data.error_code}] ${resp.data.error_message ?? ''}`);
-      return null;
+      if (resp.data.error_code !== 0 || !resp.data.data) {
+        const errCode = resp.data.error_code;
+        const errMsg = resp.data.error_message ?? '';
+        if (errCode === -69 || /retry limit/i.test(errMsg)) {
+          bumpAppGroupInfoBackoff(errMsg);
+          return getStale();
+        }
+        console.warn(`[API][APP] getGroupInfo [${errCode}] ${errMsg}`);
+        return getStale();
+      }
+
+      const parsed = JSON.parse(decodeAes(resp.data.data, sess.zpw_enk)) as {
+        data?: { gridInfoMap?: Record<string, AppGroupData> };
+      };
+      const data = parsed?.data?.gridInfoMap?.[groupId] ?? null;
+      if (data) {
+        putAppGroupInfoCache(groupId, data);
+        resetAppGroupInfoBackoff();
+      }
+      return data ?? getStale();
+    } catch (err) {
+      console.warn(`[API][APP] getGroupInfo failed:`, err instanceof Error ? err.message : err);
+      return getStale();
     }
+  })();
 
-    const parsed = JSON.parse(decodeAes(resp.data.data, sess.zpw_enk)) as {
-      data?: { gridInfoMap?: Record<string, AppGroupData> };
-    };
-    return parsed?.data?.gridInfoMap?.[groupId] ?? null;
-  } catch (err) {
-    console.warn(`[AppApi] getGroupInfo failed:`, err instanceof Error ? err.message : err);
-    return null;
+  _appGroupInfoInflight.set(groupId, request);
+  try {
+    return await request;
+  } finally {
+    if (_appGroupInfoInflight.get(groupId) === request) {
+      _appGroupInfoInflight.delete(groupId);
+    }
   }
 }
 
@@ -189,7 +264,7 @@ export async function appGetGroupMembersInfo(uids: string[]): Promise<Map<string
       );
 
       if (resp.data.error_code !== 0) {
-        console.warn(`[AppApi] /api/social/group/members error [${resp.data.error_code}]: ${resp.data.error_message ?? ''}`);
+        console.warn(`[API][APP] /api/social/group/members error [${resp.data.error_code}]: ${resp.data.error_message ?? ''}`);
         continue;
       }
 
@@ -213,7 +288,7 @@ export async function appGetGroupMembersInfo(uids: string[]): Promise<Map<string
         if (name) result.set(uid, name);
       }
     } catch (err) {
-      console.warn(`[AppApi] /api/social/group/members request failed:`, err instanceof Error ? err.message : err);
+      console.warn(`[API][APP] /api/social/group/members request failed:`, err instanceof Error ? err.message : err);
       // Return whatever we have so far; caller falls back to web API
       break;
     }
@@ -306,7 +381,7 @@ export async function appGetFriendProfilesV2(
       );
 
       if (resp.data.error_code !== 0 || !resp.data.data) {
-        console.warn(`[AppApi] getFriendProfilesV2 error [${resp.data.error_code}]: ${resp.data.error_message ?? ''}`);
+        console.warn(`[API][APP] getFriendProfilesV2 error [${resp.data.error_code}]: ${resp.data.error_message ?? ''}`);
         continue;
       }
 
@@ -321,7 +396,7 @@ export async function appGetFriendProfilesV2(
         if (displayName || zaloName) result.set(uid, { displayName, zaloName });
       }
     } catch (err) {
-      console.warn(`[AppApi] getFriendProfilesV2 request failed:`, err instanceof Error ? err.message : err);
+      console.warn(`[API][APP] getFriendProfilesV2 request failed:`, err instanceof Error ? err.message : err);
       break;
     }
   }
@@ -354,14 +429,14 @@ export async function appGetReceivedFriendRequests(count = 200, offset = 0): Pro
     });
 
     if (resp.data.error_code !== 0 || !resp.data.data) {
-      console.warn(`[AppApi] getReceivedFriendRequests error [${resp.data.error_code}]`);
+      console.warn(`[API][APP] getReceivedFriendRequests error [${resp.data.error_code}]`);
       return [];
     }
 
     const parsed = JSON.parse(decodeAes(resp.data.data, sess.zpw_enk));
     return parsed?.data?.recommItems || [];
   } catch (err) {
-    console.warn(`[AppApi] getReceivedFriendRequests failed:`, err instanceof Error ? err.message : err);
+    console.warn(`[API][APP] getReceivedFriendRequests failed:`, err instanceof Error ? err.message : err);
     return [];
   }
 }
@@ -388,14 +463,14 @@ export async function appGetSentFriendRequests(count = 200, offset = 0): Promise
     });
 
     if (resp.data.error_code !== 0 || !resp.data.data) {
-      console.warn(`[AppApi] getSentFriendRequests error [${resp.data.error_code}]`);
+      console.warn(`[API][APP] getSentFriendRequests error [${resp.data.error_code}]`);
       return {};
     }
 
     const parsed = JSON.parse(decodeAes(resp.data.data, sess.zpw_enk));
     return parsed?.data || {};
   } catch (err) {
-    console.warn(`[AppApi] getSentFriendRequests failed:`, err instanceof Error ? err.message : err);
+    console.warn(`[API][APP] getSentFriendRequests failed:`, err instanceof Error ? err.message : err);
     return {};
   }
 }
@@ -555,7 +630,7 @@ export async function appRequestVoiceCall(
     imei: sess.imei,
   };
   console.log(
-    `[AppApi][voicecall] requestcall start calleeId=${calleeId} callId=${callId} kind=${kind} typeRequest=${typeRequest}`,
+    `[API][APP][voicecall] requestcall start calleeId=${calleeId} callId=${callId} kind=${kind} typeRequest=${typeRequest}`,
   );
 
   try {
@@ -565,11 +640,11 @@ export async function appRequestVoiceCall(
         ? (parsed.data as { status?: unknown }).status
         : undefined;
     console.log(
-      `[AppApi][voicecall] requestcall done calleeId=${calleeId} callId=${callId} errorCode=${parsed.errorCode}` +
+      `[API][APP][voicecall] requestcall done calleeId=${calleeId} callId=${callId} errorCode=${parsed.errorCode}` +
       (status !== undefined ? ` status=${String(status)}` : ''),
     );
     if (parsed.data !== undefined) {
-      console.log('[AppApi][voicecall] requestcall payload:', JSON.stringify(parsed.data));
+      console.log('[API][APP][voicecall] requestcall payload:', JSON.stringify(parsed.data));
     }
 
     const result: AppVoiceCallResult = {
@@ -594,7 +669,7 @@ export async function appRequestVoiceCall(
 
       if (sid && Number.isFinite(toId) && Number.isFinite(fromId) && rtcpIP && rtpIP) {
         console.log(
-          `[AppApi][voicecall] request start calleeId=${toId} callId=${callIdResolved} session=${sid.slice(0, 12)}...`,
+          `[API][APP][voicecall] request start calleeId=${toId} callId=${callIdResolved} session=${sid.slice(0, 12)}...`,
         );
         const requestTry = await callVoiceEndpointWithVariants(sess, '/api/voicecall/request', [
           // Verified working from live test: calleeId must be the original Zalo UID string.
@@ -606,13 +681,13 @@ export async function appRequestVoiceCall(
         ]);
         const requestSignal = requestTry.result;
         console.log(
-          `[AppApi][voicecall] request done callId=${callIdResolved} errorCode=${requestSignal.errorCode}`,
+          `[API][APP][voicecall] request done callId=${callIdResolved} errorCode=${requestSignal.errorCode}`,
         );
-        console.log('[AppApi][voicecall] request body used:', JSON.stringify(requestTry.body));
-        console.log('[AppApi][voicecall] request payload:', JSON.stringify(requestSignal.data));
+        console.log('[API][APP][voicecall] request body used:', JSON.stringify(requestTry.body));
+        console.log('[API][APP][voicecall] request payload:', JSON.stringify(requestSignal.data));
 
         console.log(
-          `[AppApi][voicecall] ringring start callerId=${calleeId} callId=${callIdResolved}`,
+          `[API][APP][voicecall] ringring start callerId=${calleeId} callId=${callIdResolved}`,
         );
         const ringTry = await callVoiceEndpointWithVariants(sess, '/api/voicecall/ringring', [
           // Verified working from live test: callerId must be peer Zalo UID string.
@@ -624,10 +699,10 @@ export async function appRequestVoiceCall(
         ]);
         const ringSignal = ringTry.result;
         console.log(
-          `[AppApi][voicecall] ringring done callId=${callIdResolved} errorCode=${ringSignal.errorCode}`,
+          `[API][APP][voicecall] ringring done callId=${callIdResolved} errorCode=${ringSignal.errorCode}`,
         );
-        console.log('[AppApi][voicecall] ringring body used:', JSON.stringify(ringTry.body));
-        console.log('[AppApi][voicecall] ringring payload:', JSON.stringify(ringSignal.data));
+        console.log('[API][APP][voicecall] ringring body used:', JSON.stringify(ringTry.body));
+        console.log('[API][APP][voicecall] ringring payload:', JSON.stringify(ringSignal.data));
 
         result.signals = {
           request: requestSignal,
@@ -635,7 +710,7 @@ export async function appRequestVoiceCall(
         };
       } else {
         console.warn(
-          '[AppApi][voicecall] skip request/ringring: missing fields',
+          '[API][APP][voicecall] skip request/ringring: missing fields',
           JSON.stringify({ hasSessId: Boolean(sid), toId, fromId, hasRtcp: Boolean(rtcpIP), hasRtp: Boolean(rtpIP) }),
         );
       }
@@ -644,7 +719,7 @@ export async function appRequestVoiceCall(
     return result;
   } catch (err) {
     console.warn(
-      `[AppApi][voicecall] requestcall failed calleeId=${calleeId} callId=${callId}:`,
+      `[API][APP][voicecall] requestcall failed calleeId=${calleeId} callId=${callId}:`,
       err instanceof Error ? err.message : err,
     );
     return {
@@ -707,16 +782,16 @@ export async function appRequestGroupVoiceCall(
   };
 
   console.log(
-    `[AppApi][groupcall] requestcall start groupId=${groupId} callId=${callId} kind=${kind} partners=${normalizedPartners.length}`,
+    `[API][APP][groupcall] requestcall start groupId=${groupId} callId=${callId} kind=${kind} partners=${normalizedPartners.length}`,
   );
 
   try {
     const reqParsed = await callVoiceEndpoint(sess, '/api/voicecall/group/requestcall', requestBody);
     console.log(
-      `[AppApi][groupcall] requestcall done groupId=${groupId} callId=${callId} errorCode=${reqParsed.errorCode}`,
+      `[API][APP][groupcall] requestcall done groupId=${groupId} callId=${callId} errorCode=${reqParsed.errorCode}`,
     );
     if (reqParsed.data !== undefined) {
-      console.log('[AppApi][groupcall] requestcall payload:', JSON.stringify(reqParsed.data));
+      console.log('[API][APP][groupcall] requestcall payload:', JSON.stringify(reqParsed.data));
     }
 
     const result: AppGroupVoiceCallResult = {
@@ -784,10 +859,10 @@ export async function appRequestGroupVoiceCall(
           : null;
       if (requestSignal) {
         console.log(
-          `[AppApi][groupcall] request-signal done groupId=${groupId} callId=${resolvedCallId} errorCode=${requestSignal.errorCode}`,
+          `[API][APP][groupcall] request-signal done groupId=${groupId} callId=${resolvedCallId} errorCode=${requestSignal.errorCode}`,
         );
         if (requestSignal.data !== undefined) {
-          console.log('[AppApi][groupcall] request-signal payload:', JSON.stringify(requestSignal.data));
+          console.log('[API][APP][groupcall] request-signal payload:', JSON.stringify(requestSignal.data));
         }
       }
       // Native signature from ASAR:
@@ -802,14 +877,14 @@ export async function appRequestGroupVoiceCall(
           partners: normalizedPartners,
         };
         console.log(
-          `[AppApi][groupcall] ringring start calleeId=${calleeId} groupId=${groupId} callId=${resolvedCallId}`,
+          `[API][APP][groupcall] ringring start calleeId=${calleeId} groupId=${groupId} callId=${resolvedCallId}`,
         );
         const ring = await callVoiceEndpoint(sess, '/api/voicecall/group/ringring', ringBody);
         console.log(
-          `[AppApi][groupcall] ringring done calleeId=${calleeId} callId=${resolvedCallId} errorCode=${ring.errorCode}`,
+          `[API][APP][groupcall] ringring done calleeId=${calleeId} callId=${resolvedCallId} errorCode=${ring.errorCode}`,
         );
         if (ring.data !== undefined) {
-          console.log('[AppApi][groupcall] ringring payload:', JSON.stringify(ring.data));
+          console.log('[API][APP][groupcall] ringring payload:', JSON.stringify(ring.data));
         }
         let ringStatus: number | undefined;
         if (ring.data && typeof ring.data === 'object' && 'params' in ring.data) {
@@ -861,7 +936,7 @@ export async function appRequestGroupVoiceCall(
         result.diagnostics.state?.errorCode !== 0
       ) {
         console.warn(
-          '[AppApi][groupcall] diagnostic: request-signal/state not active, ringring alone may not trigger real ringing',
+          '[API][APP][groupcall] diagnostic: request-signal/state not active, ringring alone may not trigger real ringing',
         );
       }
     }
@@ -869,7 +944,7 @@ export async function appRequestGroupVoiceCall(
     return result;
   } catch (err) {
     console.warn(
-      `[AppApi][groupcall] requestcall failed groupId=${groupId} callId=${callId}:`,
+      `[API][APP][groupcall] requestcall failed groupId=${groupId} callId=${callId}:`,
       err instanceof Error ? err.message : err,
     );
     return {

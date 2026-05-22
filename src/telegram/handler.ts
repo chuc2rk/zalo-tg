@@ -84,7 +84,7 @@ import { config } from '../config.js';
 import { downloadToTemp, cleanTemp, convertToM4a, extractVideoThumbnail, convertWebmToGif } from '../utils/media.js';
 import { triggerQRLogin } from '../zalo/client.js';
 import { triggerAppLogin } from '../zalo/loginApp.js';
-import { invalidateAppSession, appGetReceivedFriendRequests, appGetSentFriendRequests, appGetGroupInfo, appGetGroupMembersInfo, appRequestVoiceCall, appRequestGroupVoiceCall } from '../zalo/appApi.js';
+import { invalidateAppSession, appGetReceivedFriendRequests, appGetSentFriendRequests, appGetGroupInfo, appGetGroupMembersInfo, appGetFriendProfilesV2, appRequestVoiceCall, appRequestGroupVoiceCall } from '../zalo/appApi.js';
 import { escapeHtml } from '../utils/format.js';
 
 // Bridge start time (module load = process start)
@@ -1195,7 +1195,7 @@ export function setupTelegramHandler(
     const buttons: Array<Array<{ text: string; callback_data: string } | { text: string; url: string }>> = [];
     for (const f of friendResults) {
       const existingTopicId = store.getTopicByZalo(f.userId, 0);
-      const label = aliasCache.label(f.userId, f.displayName);
+      const label = nameCache.preferred(f.userId) || f.displayName?.trim() || `Zalo ${f.userId}`;
       buttons.push([existingTopicId !== undefined
         ? { text: `👤 ${label} ✅`, callback_data: `sc:${f.userId}` }
         : { text: `👤 ${label}`, callback_data: `sc:${f.userId}` }]);
@@ -2029,35 +2029,83 @@ export function setupTelegramHandler(
       // Topic gone — fall through to recreate
     }
 
-    // Resolve display name — for DMs: alias (tên danh bạ) takes priority
+    // Resolve display name — for DMs: persistent nameCache/manual alias takes priority.
     let displayName: string | undefined;
+    let displayNameSource = '';
     if (!isGroup) {
-      // Check alias first
       displayName = nameCache.preferred(entityId) || aliasCache.get(entityId);
+      if (displayName) displayNameSource = 'nameCache/aliasCache';
       if (!displayName) {
-        // Fallback: friendsCache, then getUserInfo
         displayName = friendsCache.get(entityId)?.displayName;
+        if (displayName) displayNameSource = 'friendsCache';
       }
       if (!displayName) {
         try {
-          const resp = await currentApi?.getUserInfo(entityId) as {
-            changed_profiles?: Record<string, { displayName?: string }>;
-          } | undefined;
-          displayName = resp?.changed_profiles?.[entityId]?.displayName;
+          const names = await appGetGroupMembersInfo([entityId]);
+          displayName = names?.get(entityId)?.trim();
+          if (displayName) {
+            displayNameSource = 'app.getGroupMembersInfo';
+            console.log(`[API][APP] getGroupMembersInfo uid=${entityId} source=search_cb_dm`);
+          }
         } catch { /* ignore */ }
       }
-      if (!displayName) displayName = `Zalo ${entityId}`;
+      if (!displayName) {
+        try {
+          const profiles = await appGetFriendProfilesV2([entityId], {
+            phonebookVersion: 0,
+            language: 'vi',
+            showOnlineStatus: false,
+          });
+          const p = profiles?.get(entityId);
+          displayName = p?.displayName?.trim() || p?.zaloName?.trim();
+          if (displayName) {
+            displayNameSource = 'app.getFriendProfilesV2';
+            console.log(`[API][APP] getFriendProfilesV2 uid=${entityId} source=search_cb_dm`);
+          }
+        } catch { /* ignore */ }
+      }
+      if (!displayName) {
+        try {
+          console.log(`[API][WEB] getUserInfo uid=${entityId} source=search_cb_dm fallback=app_empty`);
+          const resp = await currentApi?.getUserInfo(entityId) as {
+            changed_profiles?: Record<string, { displayName?: string; zaloName?: string }>;
+            unchanged_profiles?: Record<string, { displayName?: string; zaloName?: string }>;
+          } | undefined;
+          const uidKey = entityId.includes('_') ? entityId : `${entityId}_0`;
+          const profile =
+            resp?.changed_profiles?.[uidKey] ??
+            resp?.changed_profiles?.[entityId] ??
+            resp?.unchanged_profiles?.[uidKey] ??
+            resp?.unchanged_profiles?.[entityId];
+          displayName = profile?.displayName?.trim() || profile?.zaloName?.trim();
+          if (displayName) {
+            displayNameSource = 'web.getUserInfo';
+            console.log(`[API][WEB] getUserInfo uid=${entityId} source=search_cb_dm resolved`);
+          }
+        } catch { /* ignore */ }
+      }
+      if (!displayName) {
+        displayName = `Zalo ${entityId}`;
+        displayNameSource = 'fallback.uid';
+      }
+      console.log(`[NameResolve][TG] uid=${entityId} source=${displayNameSource} name="${displayName}" context=search_cb_dm`);
     } else {
       displayName = groupsCache.search('', Number.MAX_SAFE_INTEGER).find(g => g.groupId === entityId)?.name;
+      if (displayName) displayNameSource = 'groupsCache';
       if (!displayName) {
         try {
           const info = await currentApi?.getGroupInfo(entityId) as {
             gridInfoMap?: Record<string, { name: string }>;
           } | undefined;
           displayName = info?.gridInfoMap?.[entityId]?.name;
+          if (displayName) displayNameSource = 'web.getGroupInfo';
         } catch { /* ignore */ }
       }
-      if (!displayName) displayName = `Nhóm ${entityId}`;
+      if (!displayName) {
+        displayName = `Nhóm ${entityId}`;
+        displayNameSource = 'fallback.groupId';
+      }
+      console.log(`[NameResolve][TG] groupId=${entityId} source=${displayNameSource} name="${displayName}" context=search_cb_group`);
     }
 
     // Create TG forum topic

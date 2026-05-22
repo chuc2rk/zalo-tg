@@ -65,9 +65,13 @@ async function populateGroupMemberCache(api: ZaloAPI, groupId: string): Promise<
   try {
     // --- Step 1: try PC App endpoint first (group-wpa.zaloapp.com, separate rate-limit) ---
     let groupData = await appGetGroupInfo(groupId);
+    if (groupData) {
+      console.log(`[API][APP] getGroupInfo group=${groupId} source=populateGroupMemberCache`);
+    }
 
     if (!groupData) {
       // Fallback: zca-js web API (rate-limited)
+      console.log(`[API][WEB] getGroupInfo group=${groupId} source=populateGroupMemberCache fallback=app_empty`);
       const info = await api.getGroupInfo(groupId) as {
         gridInfoMap?: Record<string, {
           memVerList?: string[];
@@ -113,6 +117,13 @@ async function populateGroupMemberCache(api: ZaloAPI, groupId: string): Promise<
     if (missingUids.length > 0) {
       // Try PC App endpoint (profile-wpa.zaloapp.com) — separate rate-limit bucket
       const appNames = await appGetGroupMembersInfo(missingUids).catch(() => null);
+      if (appNames) {
+        console.log(
+          `[API][APP] getGroupMembersInfo group=${groupId} source=populateGroupMemberCache requested=${missingUids.length} resolved=${appNames.size}`,
+        );
+      } else {
+        console.log(`[API][APP] getGroupMembersInfo group=${groupId} source=populateGroupMemberCache unavailable`);
+      }
       const stillMissing: string[] = [];
 
       for (const uid of missingUids) {
@@ -132,6 +143,11 @@ async function populateGroupMemberCache(api: ZaloAPI, groupId: string): Promise<
             language: 'vi',
             showOnlineStatus: false,
           }).catch(() => null);
+          if (profiles) {
+            console.log(
+              `[API][APP] getFriendProfilesV2 group=${groupId} source=populateGroupMemberCache batch=${batch.length} resolved=${profiles.size}`,
+            );
+          }
 
           for (const uid of batch) {
             const p = profiles?.get(uid);
@@ -147,6 +163,9 @@ async function populateGroupMemberCache(api: ZaloAPI, groupId: string): Promise<
         const BATCH = 50;
         for (let i = 0; i < stillMissingAfterApp.length; i += BATCH) {
           const batch = stillMissingAfterApp.slice(i, i + BATCH);
+          console.log(
+            `[API][WEB] getUserInfo group=${groupId} source=populateGroupMemberCache batch=${batch.length} fallback=app_unresolved`,
+          );
           const resp = await api.getUserInfo(batch) as {
             changed_profiles?: Record<string, { displayName?: string; zaloName?: string }>;
             unchanged_profiles?: Record<string, unknown>;
@@ -183,6 +202,19 @@ async function getCachedGroupInfo(
   const hit = _groupInfoCache.get(zaloId);
   if (hit && Date.now() - hit.ts < GROUP_INFO_TTL) return hit;
   try {
+    const appInfo = await appGetGroupInfo(zaloId);
+    if (appInfo) {
+      console.log(`[API][APP] getGroupInfo group=${zaloId} source=getCachedGroupInfo`);
+      const entry: GroupInfoEntry = {
+        name: appInfo.name ?? '',
+        avt:  appInfo.avt,
+        ts:   Date.now(),
+      };
+      _groupInfoCache.set(zaloId, entry);
+      return entry;
+    }
+
+    console.log(`[API][WEB] getGroupInfo group=${zaloId} source=getCachedGroupInfo fallback=app_empty`);
     const info = await api.getGroupInfo(zaloId) as ZaloGroupInfoResponse;
     const entry: GroupInfoEntry = {
       name: info?.gridInfoMap?.[zaloId]?.name ?? '',
@@ -278,10 +310,19 @@ function scheduleDeferredNameResolve(api: ZaloAPI, uid: string): void {
 
 async function resolveUserDisplayName(api: ZaloAPI, uid: string | undefined, fallback = 'ai đó'): Promise<string> {
   const cleanUid = uid?.trim();
-  if (!cleanUid) return fallback;
+  if (!cleanUid) {
+    console.log(`[NameResolve][ZALO] uid=<empty> source=fallback_input name="${fallback}"`);
+    return fallback;
+  }
+
+  const finalize = (source: string, rawName: string): string => {
+    const name = rawName.trim();
+    console.log(`[NameResolve][ZALO] uid=${cleanUid} source=${source} name="${name}"`);
+    return name;
+  };
 
   const persistentName = nameCache.preferred(cleanUid);
-  if (persistentName) return persistentName;
+  if (persistentName) return finalize('nameCache.preferred', persistentName);
 
   const friend = friendsCache.get(cleanUid);
   const contactName = friend?.alias?.trim()
@@ -289,19 +330,35 @@ async function resolveUserDisplayName(api: ZaloAPI, uid: string | undefined, fal
     || aliasCache.get(cleanUid)?.trim();
   if (contactName) {
     nameCache.mergeContacts([{ userId: cleanUid, alias: friend?.alias, displayName: contactName }]);
-    return contactName;
+    return finalize('friendsCache/contactAlias', contactName);
   }
 
   const cached = userCache.getName(cleanUid);
   if (cached?.trim()) {
     nameCache.mergeProfiles([{ userId: cleanUid, displayName: cached }]);
-    return cached;
+    return finalize('userCache', cached);
   }
 
   const inFlight = _pendingUserNameLookups.get(cleanUid);
-  if (inFlight) return inFlight;
+  if (inFlight) {
+    console.log(`[NameResolve][ZALO] uid=${cleanUid} source=inflight_reuse`);
+    return inFlight;
+  }
 
   const lookup = (async (): Promise<string> => {
+    try {
+      const names = await appGetGroupMembersInfo([cleanUid]);
+      const appName = names?.get(cleanUid)?.trim();
+      if (appName) {
+        console.log(`[API][APP] getGroupMembersInfo uid=${cleanUid} source=resolveUserDisplayName`);
+        userCache.save(cleanUid, appName);
+        nameCache.mergeProfiles([{ userId: cleanUid, displayName: appName }]);
+        return finalize('app.getGroupMembersInfo', appName);
+      }
+    } catch (err) {
+      console.warn(`[Zalo] app member lookup failed for ${cleanUid}:`, err);
+    }
+
     try {
       // Prefer PC App API scraped from asar:
       // POST /api/social/friend/getprofiles/v2
@@ -313,15 +370,17 @@ async function resolveUserDisplayName(api: ZaloAPI, uid: string | undefined, fal
       const p = profiles?.get(cleanUid);
       const appName = p?.displayName?.trim() || p?.zaloName?.trim();
       if (appName) {
+        console.log(`[API][APP] getFriendProfilesV2 uid=${cleanUid} source=resolveUserDisplayName`);
         userCache.save(cleanUid, appName);
         nameCache.mergeProfiles([{ userId: cleanUid, displayName: appName }]);
-        return appName;
+        return finalize('app.getFriendProfilesV2', appName);
       }
     } catch (err) {
       console.warn(`[Zalo] app profile lookup failed for ${cleanUid}:`, err);
     }
 
     try {
+      console.log(`[API][WEB] getUserInfo uid=${cleanUid} source=resolveUserDisplayName fallback=app_empty`);
       const resp = await api.getUserInfo(cleanUid) as {
         changed_profiles?: Record<string, { displayName?: string; zaloName?: string }>;
         unchanged_profiles?: Record<string, { displayName?: string; zaloName?: string }>;
@@ -335,9 +394,10 @@ async function resolveUserDisplayName(api: ZaloAPI, uid: string | undefined, fal
         resp?.unchanged_profiles?.[cleanUid];
       const name = profile?.displayName?.trim() || profile?.zaloName?.trim();
       if (name) {
+        console.log(`[API][WEB] getUserInfo uid=${cleanUid} source=resolveUserDisplayName resolved`);
         userCache.save(cleanUid, name);
         nameCache.mergeProfiles([{ userId: cleanUid, displayName: name }]);
-        return name;
+        return finalize('web.getUserInfo', name);
       }
     } catch (err) {
       console.warn(`[Zalo] resolveUserDisplayName failed for ${cleanUid}:`, err);
@@ -347,7 +407,7 @@ async function resolveUserDisplayName(api: ZaloAPI, uid: string | undefined, fal
     // over the raw UID — only use UID when no real name is available at all.
     const fallbackName = (fallback && fallback !== 'ai đó') ? fallback : (cleanUid || fallback);
     if (!fallbackName || fallbackName === cleanUid) scheduleDeferredNameResolve(api, cleanUid);
-    return fallbackName;
+    return finalize('fallback', fallbackName);
   })();
 
   _pendingUserNameLookups.set(cleanUid, lookup);
