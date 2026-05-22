@@ -869,7 +869,7 @@ export function setupTelegramHandler(
   });
 
   // /group_info — show Zalo group metadata and member names for the current topic.
-  // Usage inside a Zalo group topic: /group_info [all] or /group_infoall
+  // Usage inside a Zalo group topic: /group_info [all] [detail] or /group_infoall
   const handleGroupInfoCommand = async (ctx: Context & { message: { text?: string; message_thread_id?: number } }, forceAll = false) => {
     if (!ctx.chat || ctx.chat.id !== config.telegram.groupId) return;
     const topicId = 'message_thread_id' in ctx.message
@@ -897,7 +897,9 @@ export function setupTelegramHandler(
       return;
     }
 
-    const showAll = forceAll || /\ball\b/i.test(ctx.message.text ?? '');
+    const cmdText = ctx.message.text ?? '';
+    const showAll = forceAll || /\ball\b/i.test(cmdText);
+    const showDetail = /\b(detail|details|chi\s*ti[eế]t)\b/i.test(cmdText);
     const groupId = entry.zaloId;
 
     try {
@@ -948,12 +950,23 @@ export function setupTelegramHandler(
 
       const members = memberUids
         .map(uid => {
-          const profileName = knownNames.get(uid);
+          const cacheEntry = nameCache.get(uid);
+          const manualAlias = cacheEntry?.alias?.trim();
+          const contactName = cacheEntry?.contactName?.trim() || aliasCache.get(uid)?.trim();
+          const profileName = knownNames.get(uid) || cacheEntry?.profileName?.trim();
+          const name = manualAlias || contactName || profileName || uid;
+          const source = manualAlias ? 'manual alias'
+            : contactName ? 'contact'
+              : profileName ? 'profile'
+                : 'uid only';
           return {
             uid,
-            name: aliasCache.get(uid)?.trim() || profileName || uid,
+            name,
+            manualAlias,
+            contactName,
             profileName,
-            isAlias: Boolean(aliasCache.get(uid)?.trim()),
+            source,
+            isAlias: Boolean(manualAlias || contactName),
           };
         })
         .sort((a, b) => a.name.localeCompare(b.name, 'vi'));
@@ -970,11 +983,22 @@ export function setupTelegramHandler(
         `Thành viên: <b>${totalMember ?? '?'}</b>`,
         `Đọc được tên: <b>${resolvedCount}/${memberUids.length}</b>`,
       ];
+      if (showDetail) headerLines.push(`Mode: <b>detail</b> — có UID/source để phân biệt trùng tên`);
       if (!showAll && members.length > displayLimit) {
         headerLines.push(``, `ℹ️ Đang hiện ${displayLimit}/${members.length} người. Gõ <code>/group_info all</code> để xem hết.`);
       }
 
       const lines = visibleMembers.map((m, idx) => {
+        if (showDetail) {
+          const details = [
+            `UID: <code>${escapeHtml(m.uid)}</code>`,
+            `source: <code>${escapeHtml(m.source)}</code>`,
+          ];
+          if (m.manualAlias) details.push(`alias: ${escapeHtml(m.manualAlias)}`);
+          if (m.contactName && m.contactName !== m.manualAlias) details.push(`contact: ${escapeHtml(m.contactName)}`);
+          if (m.profileName && m.profileName !== m.name) details.push(`profile: ${escapeHtml(m.profileName)}`);
+          return `${idx + 1}. <b>${escapeHtml(m.name)}</b>\n   ${details.join(' · ')}`;
+        }
         const suffix = m.name === m.uid
           ? ` <code>${escapeHtml(m.uid)}</code>`
           : (m.isAlias && m.profileName && m.profileName !== m.name ? ` <i>(${escapeHtml(m.profileName)})</i>` : '');
