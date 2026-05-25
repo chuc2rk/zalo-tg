@@ -130,26 +130,49 @@ export function applyZaloMarkupHtml(
   return result;
 }
 
+const SENDER_BADGES = ['🔵', '🟢', '🟣', '🟠', '🔴', '🟡', '⚫', '⚪', '🟤', '🔷', '🔶', '🔹', '🔸', '🟦', '🟩', '🟪', '🟧', '🟥', '🟨', '⬛', '⬜'] as const;
+
+function stableHash(text: string): number {
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+/** Stable, compact visual badge for a Zalo sender. */
+export function senderBadge(senderName: string, stableKey = senderName): string {
+  // Keep the visual badge stable per person. Prefer immutable IDs (Zalo uid)
+  // over display names, because names can resolve differently across message types.
+  const key = stableKey || senderName || 'unknown';
+  return SENDER_BADGES[stableHash(key) % SENDER_BADGES.length];
+}
+
+export function senderLabel(senderName: string, stableKey?: string): string {
+  return `${senderBadge(senderName, stableKey)} ${truncate(senderName, 64)}`;
+}
+
 /**
  * Format a group message as:
- *   <b>SenderName:</b>
+ *   🔵 <b>SenderName:</b>
  *   content…
  */
-export function formatGroupMsg(senderName: string, content: string): string {
-  return `<b>${escapeHtml(truncate(senderName, 64))}:</b>\n${escapeHtml(truncate(content))}`;
+export function formatGroupMsg(senderName: string, content: string, stableKey?: string): string {
+  return `${escapeHtml(senderBadge(senderName, stableKey))} <b>${escapeHtml(truncate(senderName, 64))}:</b>\n${escapeHtml(truncate(content))}`;
 }
 
 /**
  * Format a group message with pre-escaped HTML body (e.g. when mention spans
  * have already been wrapped in <b> tags).
  */
-export function formatGroupMsgHtml(senderName: string, bodyHtml: string): string {
-  return `<b>${escapeHtml(truncate(senderName, 64))}:</b>\n${bodyHtml}`;
+export function formatGroupMsgHtml(senderName: string, bodyHtml: string, stableKey?: string): string {
+  return `${escapeHtml(senderBadge(senderName, stableKey))} <b>${escapeHtml(truncate(senderName, 64))}:</b>\n${bodyHtml}`;
 }
 
-/** Caption for group media (just bold sender name). */
-export function groupCaption(senderName: string): string {
-  return `<b>${escapeHtml(truncate(senderName, 64))}</b>`;
+/** Caption for group media. Includes a stable sender badge for scanability. */
+export function groupCaption(senderName: string, stableKey?: string): string {
+  return `${escapeHtml(senderBadge(senderName, stableKey))} <b>${escapeHtml(truncate(senderName, 64))}</b>`;
 }
 
 /**

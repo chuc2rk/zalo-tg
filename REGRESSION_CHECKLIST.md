@@ -13,7 +13,8 @@ Before adding a feature, applying upstream changes, or committing a fix, preserv
   - Own mentions still notify Telegram as `@chuc2rk`.
   - Zalo DM topics still prefix owner mention (`ZALO_DM_MENTION`).
   - Telegram/Zalo reply quote metadata keeps rich file/media previews and `cliMsgId` fallbacks.
-  - Forwarded bridge-generated sender-only media captions are stripped, real captions preserved.
+  - Forwarded bridge-generated sender-only media captions are stripped, real captions preserved, including scan badges like `🔵`.
   - DM topic name sync avoids unchanged Telegram renames to prevent 429/TOPIC_NOT_MODIFIED spam.
+  - Zalo→Telegram sender badges stay deterministic and HTML-safe without breaking captions/replies.
 
 Rule from Chức: **new fixes/features must not regress old patches we already spent time fixing.**

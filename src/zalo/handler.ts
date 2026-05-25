@@ -882,7 +882,7 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         ? `${escapeHtml(ZALO_DM_MENTION)}
 ${html}`
         : html;
-      const senderCaption = withDmMention(groupCaption(bridgeSenderName));
+      const senderCaption = withDmMention(groupCaption(bridgeSenderName, senderUid));
       const caption = senderCaption;
       const tgOpts  = { ...tgBase, parse_mode: 'HTML' as const, caption };
 
@@ -990,7 +990,7 @@ ${html}`
         const bodyHtml = (safeMentions?.length || safeStyles?.length)
           ? applyZaloMarkupHtml(safeBody, safeMentions, safeStyles)
           : escapeHtml(safeBody);
-        const tgText = withDmMention(formatGroupMsgHtml(bridgeSenderName, bodyHtml));
+        const tgText = withDmMention(formatGroupMsgHtml(bridgeSenderName, bodyHtml, senderUid));
         const sent = await tg.sendMessage(
           config.telegram.groupId,
           tgText,
@@ -1040,9 +1040,9 @@ ${html}`
                     ...buf.tgBase,
                     parse_mode: 'HTML' as const,
                     caption: photoCaption
-                      ? `${withDmMention(groupCaption(buf.senderName))}
+                      ? `${withDmMention(groupCaption(buf.senderName, senderUid))}
 ${escapeHtml(photoCaption)}`
-                      : withDmMention(groupCaption(buf.senderName)),
+                      : withDmMention(groupCaption(buf.senderName, senderUid)),
                   },
                 );
                 // Use buf.zaloQuote which already has the correct cliMsgId and
@@ -1062,9 +1062,9 @@ ${escapeHtml(photoCaption)}`
                 if (dlPaths.length === 0) return;
                 localPaths.push(...dlPaths);
                 const captionText = photoCaption
-                  ? `${withDmMention(groupCaption(buf.senderName))}
+                  ? `${withDmMention(groupCaption(buf.senderName, senderUid))}
 ${escapeHtml(photoCaption)}`
-                  : withDmMention(groupCaption(buf.senderName));
+                  : withDmMention(groupCaption(buf.senderName, senderUid));
                 // Telegram limits media groups to 10 items — split into batches
                 const BATCH = 10;
                 for (let i = 0; i < localPaths.length; i += BATCH) {
@@ -1531,7 +1531,7 @@ ${escapeHtml(photoCaption)}`
               : media.qrCodeUrl;
 
           const body = `👤 <b>Danh thiếp</b>\nTên: <b>${escapeHtml(contactName)}</b>\nZalo ID: <code>${uid}</code>`;
-          const fullText = type === ThreadType.Group ? `${groupCaption(bridgeSenderName)}\n${body}` : withDmMention(body);
+          const fullText = type === ThreadType.Group ? `${groupCaption(bridgeSenderName, senderUid)}\n${body}` : withDmMention(body);
 
           if (qrUrl) {
             // Send QR code image + caption
@@ -1568,7 +1568,7 @@ ${escapeHtml(photoCaption)}`
         } catch { /* ignore */ }
 
         const lines: string[] = [];
-        if (type === ThreadType.Group) lines.push(groupCaption(bridgeSenderName));
+        if (type === ThreadType.Group) lines.push(groupCaption(bridgeSenderName, senderUid));
         else if (shouldMentionDm) lines.push(escapeHtml(ZALO_DM_MENTION));
         lines.push(`🎂 <b>${escapeHtml(ecardTitle)}</b>`);
         if (ecardDesc && ecardDesc !== ecardTitle) lines.push(escapeHtml(ecardDesc));
@@ -1679,7 +1679,7 @@ ${escapeHtml(photoCaption)}`
 
       console.log(`[ZaloHandler] Unhandled msgType="${msgType}" content:`, JSON.stringify(msg.data.content));
       const fallback = type === ThreadType.Group
-        ? `${groupCaption(bridgeSenderName)}\n<i>[${msgType}]</i>`
+        ? `${groupCaption(bridgeSenderName, senderUid)}\n<i>[${msgType}]</i>`
         : withDmMention(`<i>[${msgType}]</i>`);
       const sentFallback = await tg.sendMessage(config.telegram.groupId, fallback, {
         ...tgBase,
