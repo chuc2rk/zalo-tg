@@ -1,0 +1,4 @@
+bb532c2 fix: update reaction summary after Telegram reactions
+ src/store.ts            |  4 ++++
+ src/telegram/handler.ts | 28 +++++++++++++++++++++++++++-
+ 2 files changed, 31 insertions(+), 1 deletion(-)

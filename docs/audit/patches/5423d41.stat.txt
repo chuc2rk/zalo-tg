@@ -1,0 +1,5 @@
+5423d41 fix: adopt safer reaction dedupe and Zalo reaction API call
+ src/store.ts            | 67 +++++++++++++++++++++++++++++++++++++++++++++++++
+ src/telegram/handler.ts | 24 +++++++++++++++---
+ src/zalo/handler.ts     | 45 +++++++++++++++++++++++++--------
+ 3 files changed, 122 insertions(+), 14 deletions(-)

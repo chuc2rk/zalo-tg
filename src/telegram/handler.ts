@@ -1,4 +1,4 @@
-import { Reactions, ThreadType, type AttachmentSource } from 'zca-js';
+import { Reactions, ThreadType, type AttachmentSource, type UploadAttachmentType } from 'zca-js';
 import type { Context } from 'telegraf';
 import path from 'path';
 import { createReadStream } from 'fs';
@@ -16,6 +16,7 @@ function normalizeSenderOnlyCaption(text: string): string {
     .replace(/&gt;/gi, '>')
     .replace(/^@chuc2rk\s*/i, '')
     .replace(/^👤\s*/, '')
+    .replace(/^(?:[🔵🟢🟣🟠🔴🟡⚫⚪🟤🔷🔶🔹🔸🟦🟩🟪🟧🟥🟨⬛⬜]\s+)?[A-Z0-9?]{2}\s+/u, '')
     .replace(/[:：]$/, '')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -84,7 +85,7 @@ import { config } from '../config.js';
 import { downloadToTemp, cleanTemp, convertToM4a, extractVideoThumbnail, convertWebmToGif } from '../utils/media.js';
 import { triggerQRLogin } from '../zalo/client.js';
 import { triggerAppLogin } from '../zalo/loginApp.js';
-import { invalidateAppSession, appGetReceivedFriendRequests, appGetSentFriendRequests, appGetGroupInfo, appGetGroupMembersInfo, appGetFriendProfilesV2, appRequestVoiceCall, appRequestGroupVoiceCall } from '../zalo/appApi.js';
+import { invalidateAppSession, appGetReceivedFriendRequests, appGetSentFriendRequests, appGetGroupInfo, appGetGroupMembersInfo, appGetFriendProfilesV2, appRequestVoiceCall, appRequestGroupVoiceCall, type AppUserProfile } from '../zalo/appApi.js';
 import { escapeHtml } from '../utils/format.js';
 
 // Bridge start time (module load = process start)
@@ -939,6 +940,7 @@ export function setupTelegramHandler(
           .filter(Boolean),
       ));
 
+      const memberProfiles = new Map<string, AppUserProfile>();
       const missingUids = memberUids.filter(uid => !knownNames.has(uid));
       if (missingUids.length > 0) {
         const appNames = await appGetGroupMembersInfo(missingUids).catch(() => null);
@@ -948,12 +950,54 @@ export function setupTelegramHandler(
         }
       }
 
+      // Detail mode should include phone numbers when Zalo exposes them.
+      // `getUserInfo` may include `phoneNumber` for allowed/visible contacts; otherwise keep it null.
+      if (showDetail && memberUids.length > 0) {
+        const BATCH = 50;
+        for (let i = 0; i < memberUids.length; i += BATCH) {
+          const batch = memberUids.slice(i, i + BATCH);
+
+          const appProfiles = await appGetFriendProfilesV2(batch, {
+            phonebookVersion: 0,
+            language: 'vi',
+            showOnlineStatus: false,
+          }).catch(() => null);
+          for (const uid of batch) {
+            const p = appProfiles?.get(uid);
+            if (p) memberProfiles.set(uid, p);
+          }
+
+          try {
+            const resp = await currentApi.getUserInfo(batch) as {
+              changed_profiles?: Record<string, AppUserProfile>;
+              unchanged_profiles?: Record<string, AppUserProfile>;
+            };
+            for (const uid of batch) {
+              const uidKey = uid.includes('_') ? uid : `${uid}_0`;
+              const p = resp?.changed_profiles?.[uidKey]
+                ?? resp?.changed_profiles?.[uid]
+                ?? resp?.unchanged_profiles?.[uidKey]
+                ?? resp?.unchanged_profiles?.[uid];
+              if (!p) continue;
+              memberProfiles.set(uid, { ...(memberProfiles.get(uid) ?? {}), ...p });
+            }
+          } catch (err) {
+            console.warn('[/group_info] getUserInfo detail failed:', err instanceof Error ? err.message : err);
+          }
+        }
+      }
+
       const members = memberUids
         .map(uid => {
           const cacheEntry = nameCache.get(uid);
           const manualAlias = cacheEntry?.alias?.trim();
           const contactName = cacheEntry?.contactName?.trim() || aliasCache.get(uid)?.trim();
-          const profileName = knownNames.get(uid) || cacheEntry?.profileName?.trim();
+          const profile = memberProfiles.get(uid);
+          const phoneNumber = profile?.phoneNumber?.trim() || null;
+          const profileName = knownNames.get(uid)
+            || profile?.displayName?.trim()
+            || profile?.zaloName?.trim()
+            || cacheEntry?.profileName?.trim();
           const name = manualAlias || contactName || profileName || uid;
           const source = manualAlias ? 'manual alias'
             : contactName ? 'contact'
@@ -965,6 +1009,7 @@ export function setupTelegramHandler(
             manualAlias,
             contactName,
             profileName,
+            phoneNumber,
             source,
             isAlias: Boolean(manualAlias || contactName),
           };
@@ -992,6 +1037,7 @@ export function setupTelegramHandler(
         if (showDetail) {
           const details = [
             `UID: <code>${escapeHtml(m.uid)}</code>`,
+            `phone: <code>${escapeHtml(m.phoneNumber ?? 'none')}</code>`,
             `source: <code>${escapeHtml(m.source)}</code>`,
           ];
           if (m.manualAlias) details.push(`alias: ${escapeHtml(m.manualAlias)}`);
@@ -2312,6 +2358,11 @@ export function setupTelegramHandler(
       console.log(`[TG→Zalo] getZaloQuote: found in msgStore for tgMsgId=${tgMsgId} msgId=${fromMsgStore.msgId} cliMsgId=${fromMsgStore.cliMsgId}`);
       return fromMsgStore;
     }
+    const fromSentStore = sentMsgStore.getQuote(tgMsgId);
+    if (fromSentStore) {
+      console.log(`[TG→Zalo] getZaloQuote: fallback from sentMsgStore for tgMsgId=${tgMsgId} msgId=${fromSentStore.msgId} cliMsgId=${fromSentStore.cliMsgId}`);
+      return fromSentStore;
+    }
     console.log(`[TG→Zalo] getZaloQuote: no quote found for tgMsgId=${tgMsgId}`);
     return undefined;
   }
@@ -2516,9 +2567,10 @@ export function setupTelegramHandler(
           // zca-js splits internally when msg is non-empty + quote is set:
           //   1) sends caption+quote as text (reply indicator in Zalo)
           //   2) sends attachment without quote
-          // When no caption, skip the quote — adding a placeholder text just to
-          // carry the quote would create visible noise in the conversation.
-          const effectiveCaption = caption ?? '';
+          // zca-js only carries attachment quotes through the caption/text part.
+          // If a replied file has no caption, add a small filename label so Zalo
+          // renders the native reply indicator instead of silently dropping it.
+          const effectiveCaption = caption ?? (zaloQuote ? `📎 ${filename}` : '');
 
           let attachmentSource: AttachmentSource[] = [localPath];
           if (!['jpg', 'jpeg', 'png', 'webp', 'gif', 'mp4'].includes(path.extname(filename).slice(1).toLowerCase())) {
@@ -2530,6 +2582,7 @@ export function setupTelegramHandler(
             }];
           }
 
+          let uploadedForQuote: UploadAttachmentType[] | undefined;
           const sendResult = await api.sendMessage(
             {
               msg: effectiveCaption,
@@ -2568,13 +2621,45 @@ export function setupTelegramHandler(
           if (primaryZaloMsgId !== undefined) {
             sentMsgStore.save(msg.message_id, { msgIds: zaloMsgIds, zaloId, threadType });
             const ownUid = String(api.getOwnId?.() ?? '');
+            const ext = path.extname(filename).slice(1).toLowerCase();
+            const isGenericFile = !['jpg', 'jpeg', 'png', 'webp', 'gif', 'mp4'].includes(ext);
+            const buildFallbackFileQuoteContent = async (): Promise<string | Record<string, unknown>> => {
+              if (!isGenericFile) return caption ?? '';
+              try {
+                const uploads = uploadedForQuote ?? await api.uploadAttachment(attachmentSource, zaloId, threadType);
+                uploadedForQuote = uploads;
+                const uploaded = uploads[0];
+                if (uploaded?.fileType === 'others' || uploaded?.fileType === 'video') {
+                  return {
+                    title: uploaded.fileName,
+                    description: '',
+                    href: uploaded.fileUrl,
+                    thumb: '',
+                    childnumber: 0,
+                    action: '',
+                    params: JSON.stringify({
+                      fileSize: String(uploaded.totalSize),
+                      checksum: uploaded.checksum,
+                      checksumSha: 'null',
+                      fileExt: ext,
+                      fdata: '{}',
+                      fType: 1,
+                    }),
+                    type: '',
+                  };
+                }
+              } catch (quoteErr) {
+                console.warn(`[TG→Zalo] Could not build rich file quote metadata for ${filename}:`, quoteErr);
+              }
+              return caption || filename;
+            };
             msgStore.save(msg.message_id, zaloMsgIds.map(String), {
               msgId: String(primaryZaloMsgId),
               cliMsgId: '',
               uidFrom: ownUid,
               ts: String(Math.floor(Date.now() / 1000)),
-              msgType: 'share.file',
-              content: caption || filename,
+              msgType: isGenericFile ? 'share.file' : 'webchat',
+              content: await buildFallbackFileQuoteContent(),
               ttl: 0,
               zaloId,
               threadType: entry.type,
@@ -3038,6 +3123,10 @@ export function setupTelegramHandler(
       }
 
       if ('location' in msg && msg.location) {
+        const replyToMsgId = 'reply_to_message' in msg
+          ? (msg as { reply_to_message?: { message_id: number } }).reply_to_message?.message_id
+          : undefined;
+        const zaloQuote = getZaloQuote(replyToMsgId);
         const { latitude, longitude } = msg.location;
         const venue = ('venue' in msg && msg.venue) ? (msg.venue as { title?: string; address?: string }) : undefined;
         const mapsUrl = `https://www.google.com/maps?q=${latitude},${longitude}`;
@@ -3046,7 +3135,11 @@ export function setupTelegramHandler(
           : `📍 ${mapsUrl}`;
         sentMsgStore.markSending(zaloId);
         try {
-          const result = await api.sendMessage({ msg: locationLabel }, zaloId, threadType) as { message?: { msgId?: number } };
+          const result = await api.sendMessage(
+            { msg: locationLabel, ...(zaloQuote ? { quote: zaloQuote } : {}) },
+            zaloId,
+            threadType,
+          ) as { message?: { msgId?: number } };
           const zaloMsgId = result?.message?.msgId;
           if (zaloMsgId !== undefined) {
             sentMsgStore.save(msg.message_id, { msgIds: [zaloMsgId], zaloId, threadType });

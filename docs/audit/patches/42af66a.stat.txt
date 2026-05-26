@@ -1,0 +1,4 @@
+42af66a Fix Zalo call signaling payload IDs and add fallback variants
+ src/telegram/handler.ts | 254 ++++++++++++++++++++++++-
+ src/zalo/appApi.ts      | 489 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 742 insertions(+), 1 deletion(-)

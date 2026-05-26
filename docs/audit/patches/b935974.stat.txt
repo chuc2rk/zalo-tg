@@ -1,0 +1,7 @@
+b935974 fix: harden local bridge behavior
+ src/index.ts            |   5 +-
+ src/store.ts            | 262 ++++++++++++++++++++++++++++++++++++++----------
+ src/telegram/handler.ts |  30 ++++++
+ src/zalo/handler.ts     | 165 +++++++++++++++++++++++-------
+ src/zalo/types.ts       |   7 ++
+ 5 files changed, 380 insertions(+), 89 deletions(-)

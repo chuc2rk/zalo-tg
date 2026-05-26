@@ -1,0 +1,9 @@
+120e5b3 fix: preserve rich quotes for Telegram-originated files
+ Dockerfile               |  1 +
+ package-lock.json        |  1 +
+ package.json             |  3 ++-
+ scripts/patch-zca-js.mjs | 32 ++++++++++++++++++++++++++++++++
+ src/store.ts             | 45 ++++++++++++++++++++++++++++++++++++++++++++-
+ src/telegram/handler.ts  | 16 ++++++++++++++++
+ src/zalo/handler.ts      | 40 +++++++++++++++++++++++++++++++++-------
+ 7 files changed, 129 insertions(+), 9 deletions(-)

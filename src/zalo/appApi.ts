@@ -302,6 +302,7 @@ export async function appGetGroupMembersInfo(uids: string[]): Promise<Map<string
 export interface AppUserProfile {
   displayName?: string;
   zaloName?: string;
+  phoneNumber?: string;
 }
 
 function pickProfileMap(parsed: unknown): Record<string, AppUserProfile> {

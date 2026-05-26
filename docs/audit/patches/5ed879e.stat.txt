@@ -1,0 +1,5 @@
+5ed879e fix: selectively adopt upstream voice echo improvements
+ src/telegram/handler.ts | 10 ++++++++--
+ src/utils/media.ts      |  5 ++++-
+ src/zalo/handler.ts     | 12 ++++++------
+ 3 files changed, 18 insertions(+), 9 deletions(-)

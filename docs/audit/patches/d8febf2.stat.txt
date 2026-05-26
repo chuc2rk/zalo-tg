@@ -1,0 +1,4 @@
+d8febf2 fix: preserve Zalo file quote previews for Telegram forwards
+ src/store.ts            | 60 +++++++++++++++++++++++++++++++---
+ src/telegram/handler.ts | 87 +++++++++++++++++++++++++++++++++++++++----------
+ 2 files changed, 124 insertions(+), 23 deletions(-)

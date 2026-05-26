@@ -1,0 +1,7 @@
+5bfca44 fix: stabilize Zalo reconnect and reaction catch-up
+ package-lock.json       |  2 +-
+ package.json            |  2 +-
+ src/index.ts            | 69 +++++++++++++++++++++++++++++++++++++++----------
+ src/telegram/handler.ts | 10 +++++++
+ src/zalo/handler.ts     | 22 ++++++++++++++++
+ 5 files changed, 90 insertions(+), 15 deletions(-)

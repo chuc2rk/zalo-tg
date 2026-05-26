@@ -163,6 +163,7 @@ interface MsgMapV2 {
 type MsgMapFile = MsgMapV1 | MsgMapV2;
 
 type QuoteEchoPatch = Partial<Pick<ZaloQuoteData, 'msgId' | 'cliMsgId' | 'msgType' | 'content' | 'ts' | 'ttl'>>;
+type RichQuote = ZaloQuoteData;
 
 interface MsgMapData {
   pairs:  [string, number][];
@@ -208,6 +209,7 @@ function _loadMsgMap(): MsgMapData {
 }
 
 const _pendingQuoteEchoById = new Map<string, QuoteEchoPatch>();
+const _pendingQuoteByZaloId = new Map<string, RichQuote>();
 
 let _msgPersistTimer: ReturnType<typeof setTimeout> | null = null;
 function _scheduleMsgPersist(): void {
@@ -378,10 +380,10 @@ export const msgStore = {
 
   /** Find a nearby rich attachment quote for wrapper/placeholder Telegram messages. */
   findNearbyRichQuote(tgMsgId: number, current?: ZaloQuoteData): { tgMsgId: number; quote: ZaloQuoteData } | undefined {
-    const window = 3;
+    const window = 4;
     const sameThread = (q: ZaloQuoteData): boolean => !current || (q.zaloId === current.zaloId && q.threadType === current.threadType);
     for (let delta = 1; delta <= window; delta++) {
-      for (const candidateId of [tgMsgId - delta, tgMsgId + delta]) {
+      for (const candidateId of [tgMsgId + delta, tgMsgId - delta]) {
         const q = _tgToQuote.get(candidateId);
         if (!q || !sameThread(q)) continue;
         const isRich = q.msgType !== 'webchat' || typeof q.content !== 'string';
@@ -389,6 +391,30 @@ export const msgStore = {
       }
     }
     return undefined;
+  },
+
+  /** Attach richer native Zalo quote data once a TG→Zalo self-echo arrives. */
+  attachQuote(zaloMsgIds: string[], quote: ZaloQuoteData): void {
+    const ids = zaloMsgIds.map(id => String(id)).filter(id => id && id !== '0');
+    const tgMsgId = ids
+      .map(id => _zaloToTg.get(id))
+      .find((id): id is number => id !== undefined);
+    if (tgMsgId === undefined) {
+      for (const id of ids) _pendingQuoteByZaloId.set(id, quote);
+      setTimeout(() => {
+        for (const id of ids) _pendingQuoteByZaloId.delete(id);
+      }, 60_000);
+      return;
+    }
+    const validIds = ids.filter(id => !_zaloToTg.has(id));
+    while (_msgKeyOrder.length + validIds.length > MSG_CACHE_MAX) _evictOne();
+    for (const id of validIds) {
+      _zaloToTg.set(id, tgMsgId);
+      _tgRefCount.set(tgMsgId, (_tgRefCount.get(tgMsgId) ?? 0) + 1);
+      _msgKeyOrder.push(id);
+    }
+    this.save(tgMsgId, ids, quote);
+    for (const id of ids) _pendingQuoteByZaloId.delete(id);
   },
 
   /**
@@ -900,10 +926,43 @@ export const sentMsgStore = {
     for (const mid of info.msgIds) {
       _sentByZaloId.set(String(mid), tgMsgId);
     }
+
+    // Zalo can emit the self-echo before api.sendMessage/upload resolves,
+    // especially in DMs. In that race, attachQuote() cannot resolve tgMsgId yet,
+    // so it parks the rich quote payload here. Consume it as soon as save() binds
+    // the returned Zalo ids to this Telegram message.
+    const pendingQuote = info.msgIds
+      .map(mid => _pendingQuoteByZaloId.get(String(mid)))
+      .find((quote): quote is ZaloQuoteData => quote !== undefined);
+    if (pendingQuote) {
+      msgStore.save(tgMsgId, info.msgIds.map(String), pendingQuote);
+      for (const mid of info.msgIds) _pendingQuoteByZaloId.delete(String(mid));
+    }
   },
 
   get(tgMsgId: number): SentMsgInfo | undefined {
     return _sentMap.get(tgMsgId);
+  },
+
+  /** Build fallback quote data so Telegram replies to TG-originated messages can quote on Zalo too. */
+  getQuote(tgMsgId: number): ZaloQuoteData | undefined {
+    const rich = msgStore.getQuote(tgMsgId);
+    if (rich) return rich;
+    const info = _sentMap.get(tgMsgId);
+    if (!info) return undefined;
+    const msgId = String(info.msgIds[0] ?? '');
+    if (!msgId) return undefined;
+    return {
+      msgId,
+      cliMsgId: msgId,
+      uidFrom: '0',
+      ts: String(Math.floor(Date.now() / 1000)),
+      msgType: 'webchat',
+      content: '',
+      ttl: 0,
+      zaloId: info.zaloId,
+      threadType: info.threadType,
+    };
   },
 
   /**

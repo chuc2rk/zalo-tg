@@ -7,7 +7,8 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "vitest run"
+    "test": "vitest run",
+    "postinstall": "node scripts/patch-zca-js.mjs"
   },
   "dependencies": {
     "@types/qrcode": "^1.5.6",
@@ -27,6 +28,7 @@
     "@types/node": "^20.14.0",
     "@types/qrcode-terminal": "^0.12.2",
     "tsx": "^4.15.6",
-    "typescript": "^5.4.5"
+    "typescript": "^5.4.5",
+    "vitest": "^1.6.1"
   }
 }

@@ -2064,8 +2064,35 @@ ${escapeHtml(photoCaption)}`
       const topicId = store.getTopicByZalo(groupId, 1 /* Group */);
       if (topicId === undefined) return;
 
-      const members: Array<{ dName?: string }> = data?.updateMembers ?? [];
-      const names = members.map(m => m.dName ?? '?').join(', ');
+      const members: Array<{ uid?: string; id?: string; userId?: string; dName?: string; displayName?: string; zaloName?: string }> = data?.updateMembers ?? [];
+      const resolvedNames = await Promise.all(members.map(async (m) => {
+        const rawUid = String(m.uid ?? m.id ?? m.userId ?? '').trim();
+        const fallbackName = m.dName?.trim() || m.displayName?.trim() || m.zaloName?.trim() || rawUid || '?';
+
+        // group_event payload can miss uid (or use uid_0 variant).
+        // Prefer any known cache-backed uid so contact-book names win.
+        const uidCandidates = rawUid
+          ? [rawUid, rawUid.endsWith('_0') ? rawUid.slice(0, -2) : rawUid]
+          : [];
+        const knownUid = uidCandidates.find((uid) =>
+          !!uid && (
+            !!nameCache.preferred(uid)
+            || !!friendsCache.get(uid)
+            || !!userCache.getName(uid)
+          ),
+        );
+
+        const resolvedUid = knownUid
+          || (rawUid || undefined)
+          || nameCache.resolveByName(fallbackName)
+          || aliasCache.resolveByAlias(fallbackName)
+          || undefined;
+
+        return resolvedUid
+          ? await resolveUserDisplayName(api, resolvedUid, fallbackName)
+          : fallbackName;
+      }));
+      const names = resolvedNames.join(', ');
       const actor  = data?.creatorId === data?.sourceId ? '' : '';  // unused for now
       void actor;
 

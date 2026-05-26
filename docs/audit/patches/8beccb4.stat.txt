@@ -1,0 +1,5 @@
+8beccb4 fix: preserve Zalo quote for Telegram self replies
+ src/store.ts            | 33 +++++++++++++++++++++++++++++++++
+ src/telegram/handler.ts | 28 +++++++++++++++++++++-------
+ src/zalo/handler.ts     | 15 +++++++++++++++
+ 3 files changed, 69 insertions(+), 7 deletions(-)

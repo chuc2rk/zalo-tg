@@ -1,0 +1,3 @@
+a02c154 fix: mention owner directly in DM topics
+ src/zalo/handler.ts | 66 ++++++++---------------------------------------------
+ 1 file changed, 9 insertions(+), 57 deletions(-)
