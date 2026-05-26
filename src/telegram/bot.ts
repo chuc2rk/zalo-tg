@@ -35,5 +35,11 @@ export const tgBot = new Telegraf(config.telegram.token, {
 });
 
 export async function syncTelegramCommands(): Promise<void> {
+  // Telegram caches command menus per scope. Setting only the default scope can
+  // leave the menu empty in supergroups/topics, so sync the scopes we actually use.
   await tgBot.telegram.setMyCommands(BOT_COMMANDS);
+  await tgBot.telegram.setMyCommands(BOT_COMMANDS, { scope: { type: 'all_group_chats' } });
+  await tgBot.telegram.setMyCommands(BOT_COMMANDS, {
+    scope: { type: 'chat', chat_id: config.telegram.groupId },
+  });
 }

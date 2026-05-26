@@ -87,6 +87,7 @@ import { triggerQRLogin } from '../zalo/client.js';
 import { triggerAppLogin } from '../zalo/loginApp.js';
 import { invalidateAppSession, appGetReceivedFriendRequests, appGetSentFriendRequests, appGetGroupInfo, appGetGroupMembersInfo, appGetFriendProfilesV2, appRequestVoiceCall, appRequestGroupVoiceCall, type AppUserProfile } from '../zalo/appApi.js';
 import { escapeHtml } from '../utils/format.js';
+import { triggerUpdateCheck } from '../updater.js';
 
 // Bridge start time (module load = process start)
 const _bridgeStartTime = Date.now();
@@ -484,11 +485,28 @@ export function setupTelegramHandler(
       const lines = all.map(e =>
         `• <b>${e.name}</b> — topicId=${e.topicId}, zaloId=${e.zaloId}, type=${e.type === 1 ? 'group' : 'dm'}`,
       );
-      await ctx.telegram.sendMessage(
-        config.telegram.groupId,
-        `📋 <b>Bridge topics</b> (${all.length}):\n${lines.join('\n')}`,
-        { ...replyOpts, parse_mode: 'HTML' },
-      );
+      const header = `📋 <b>Bridge topics</b> (${all.length})`;
+      let chunk = header;
+      for (const line of lines) {
+        const next = `${chunk}\n${line}`;
+        if (next.length > 3500) {
+          await ctx.telegram.sendMessage(
+            config.telegram.groupId,
+            chunk,
+            { ...replyOpts, parse_mode: 'HTML' },
+          );
+          chunk = line;
+        } else {
+          chunk = next;
+        }
+      }
+      if (chunk) {
+        await ctx.telegram.sendMessage(
+          config.telegram.groupId,
+          chunk,
+          { ...replyOpts, parse_mode: 'HTML' },
+        );
+      }
       return;
     }
 
@@ -1644,6 +1662,22 @@ export function setupTelegramHandler(
     );
   });
 
+  // /update — safe notify-only update check. Does not auto-pull because this branch carries local fixes.
+  tgBot.command('update', async (ctx) => {
+    if (ctx.chat.id !== config.telegram.groupId) return;
+    const replyOpts = ctx.message.message_thread_id
+      ? { message_thread_id: ctx.message.message_thread_id }
+      : {};
+    const found = await triggerUpdateCheck(ctx.telegram);
+    if (!found) {
+      await ctx.telegram.sendMessage(
+        config.telegram.groupId,
+        '✅ Không có bản cập nhật mới từ upstream.',
+        replyOpts,
+      );
+    }
+  });
+
   // /status — bridge uptime, topic count, Zalo account
   tgBot.command('status', async (ctx) => {
     if (ctx.chat.id !== config.telegram.groupId) return;
@@ -2321,6 +2355,31 @@ export function setupTelegramHandler(
         reactionEchoStore.cancel(quote.zaloId, quote.msgId, zaloIcon);
         throw err;
       }
+      // The Zalo echo of this TG reaction is intentionally suppressed above, so
+      // update any existing Zalo→TG reaction summary locally to keep the line
+      // consistent with the visible Telegram native reaction. Editing a Telegram
+      // message does not emit message_reaction, so this does not recurse.
+      const summary = reactionSummaryStore.get(tgMsgId);
+      if (summary?.summaryTgMsgId !== null && summary?.summaryTgMsgId !== undefined) {
+        try {
+          const actorName = [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(' ') || ctx.from?.username || 'Telegram';
+          reactionSummaryStore.upsert(tgMsgId, tgEmoji, actorName);
+          const text = reactionSummaryStore.buildText(summary, escapeHtml);
+          if (text && text !== summary.lastSentText) {
+            await ctx.telegram.editMessageText(
+              config.telegram.groupId,
+              summary.summaryTgMsgId,
+              undefined,
+              text,
+              { parse_mode: 'HTML' },
+            );
+            reactionSummaryStore.setLastSentText(tgMsgId, text);
+          }
+        } catch (summaryErr) {
+          console.warn('[TG→Zalo] Reaction summary local update failed:', summaryErr);
+        }
+      }
+
       console.log(`[TG→Zalo] Reaction "${tgEmoji}" → Zalo "${zaloIcon}" on msg ${quote.msgId}`);
     } catch (err) {
       console.error('[TG→Zalo] Reaction error:', err);
@@ -2583,7 +2642,7 @@ export function setupTelegramHandler(
           }
 
           let uploadedForQuote: UploadAttachmentType[] | undefined;
-          const sendResult = await api.sendMessage(
+          const sendMessageAttachmentSource = async () => api.sendMessage(
             {
               msg: effectiveCaption,
               attachments: attachmentSource,
@@ -2592,7 +2651,9 @@ export function setupTelegramHandler(
             },
             zaloId,
             threadType,
-          ).catch(async (err: unknown) => {
+          );
+
+          const sendResult = await sendMessageAttachmentSource().catch(async (err: unknown) => {
             // Code 114 with quote: quote data incompatible with this message type.
             // Retry without quote so the attachment still goes through.
             if ((err as { code?: number })?.code === 114) {

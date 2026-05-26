@@ -195,12 +195,36 @@ interface GroupInfoEntry { name: string; avt?: string; ts: number }
 const _groupInfoCache = new Map<string, GroupInfoEntry>();
 const GROUP_INFO_TTL = 5 * 60 * 1000; // 5 min
 
+function extractGroupInfoName(info: ZaloGroupInfoResponse | undefined, zaloId: string): string {
+  const gridInfoMap = info?.gridInfoMap;
+  if (!gridInfoMap) return '';
+
+  const exact = gridInfoMap[zaloId]?.name?.trim();
+  if (exact) return exact;
+
+  const values = Object.values(gridInfoMap);
+  if (values.length === 1) return values[0]?.name?.trim() ?? '';
+  return '';
+}
+
 async function getCachedGroupInfo(
   api: ZaloAPI,
   zaloId: string,
 ): Promise<{ name?: string; avt?: string }> {
   const hit = _groupInfoCache.get(zaloId);
   if (hit && Date.now() - hit.ts < GROUP_INFO_TTL) return hit;
+
+  const appInfo = await appGetGroupInfo(zaloId);
+  if (appInfo?.name?.trim() || appInfo?.avt) {
+    const entry: GroupInfoEntry = {
+      name: appInfo.name?.trim() ?? '',
+      avt: appInfo.avt,
+      ts: Date.now(),
+    };
+    _groupInfoCache.set(zaloId, entry);
+    return entry;
+  }
+
   try {
     const appInfo = await appGetGroupInfo(zaloId);
     if (appInfo) {
@@ -217,7 +241,7 @@ async function getCachedGroupInfo(
     console.log(`[API][WEB] getGroupInfo group=${zaloId} source=getCachedGroupInfo fallback=app_empty`);
     const info = await api.getGroupInfo(zaloId) as ZaloGroupInfoResponse;
     const entry: GroupInfoEntry = {
-      name: info?.gridInfoMap?.[zaloId]?.name ?? '',
+      name: extractGroupInfoName(info, zaloId),
       avt:  info?.gridInfoMap?.[zaloId]?.avt,
       ts:   Date.now(),
     };
@@ -628,6 +652,62 @@ const _memberCacheLoaded = new Set<string>();
  */
 const _inFlightMsgIds = new Set<string>();
 
+type HistoricalZaloMessage = ZaloMessage & { __catchup?: true };
+
+function normalizeHistoryMessage(raw: unknown, groupId: string): HistoricalZaloMessage | null {
+  const candidate = raw as Partial<ZaloMessage> & { data?: ZaloMessage['data'] };
+  const data = candidate?.data;
+  if (!data?.msgId) return null;
+  return {
+    type: ThreadType.Group,
+    threadId: candidate.threadId ?? groupId,
+    isSelf: Boolean(candidate.isSelf),
+    data,
+    __catchup: true,
+  };
+}
+
+
+async function catchUpMissedGroupMessages(
+  api: ZaloAPI,
+  handleZaloMessage: (msg: HistoricalZaloMessage) => Promise<void>,
+): Promise<void> {
+  // Zalo does not replay websocket events that arrive while the bridge is
+  // restarting. After listener startup, scan a tiny history window and forward
+  // only messages that are not already in msgStore. This makes restarts safe.
+  const groups = store.all().filter(e => e.type === 1);
+  let forwarded = 0;
+  for (const entry of groups) {
+    try {
+      const history = await api.getGroupChatHistory(entry.zaloId, 5) as { groupMsgs?: unknown[] };
+      const msgs = (history.groupMsgs ?? [])
+        .map(raw => normalizeHistoryMessage(raw, entry.zaloId))
+        .filter((m): m is HistoricalZaloMessage => m !== null)
+        .sort((a, b) => Number(a.data.ts || 0) - Number(b.data.ts || 0));
+      for (const msg of msgs) {
+        const ids = [msg.data.msgId, msg.data.realMsgId, msg.data.cliMsgId]
+          .filter((id): id is string => typeof id === 'string' && id.length > 0 && id !== '0');
+        if (ids.some(id => msgStore.getTgMsgId(id) !== undefined)) continue;
+
+        // Only catch up recent missed messages. Old group history is intentionally
+        // ignored to avoid flooding Telegram on first install/reconfigure.
+        const ts = Number(msg.data.ts || 0);
+        if (ts > 0 && Date.now() - ts > 15 * 60_000) continue;
+
+        console.log(`[Zalo→TG] Catch-up missed message group=${entry.zaloId} msgId=${msg.data.msgId}`);
+        await handleZaloMessage(msg);
+        forwarded++;
+      }
+      // Small delay keeps the startup scan gentle across many groups.
+      await new Promise(r => setTimeout(r, 100));
+    } catch (err) {
+      console.warn(`[Zalo→TG] Catch-up failed for group ${entry.zaloId}:`, err instanceof Error ? err.message : err);
+    }
+  }
+  if (forwarded > 0) console.log(`[Zalo→TG] Catch-up forwarded ${forwarded} missed message(s)`);
+}
+
+
 export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
   // Warm only a small slice of existing group topics on startup. Older code
   // tried to preload every mapped group and marked all of them as loaded before
@@ -690,7 +770,7 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
     console.warn('[Zalo] Failed to load address-book names:', err);
   }
 
-  api.listener.on('message', async (msg: ZaloMessage) => {
+  const handleZaloMessage = async (msg: HistoricalZaloMessage | ZaloMessage) => {
     try {
       // Skip TG→Zalo echo (re-emitted by Zalo server) but forward
       // real self messages sent directly from the Zalo app.
@@ -916,14 +996,19 @@ ${html}`
         uidFrom:  senderUid,
         ts:       msg.data.ts,
         msgType:  msgType,
-        // For text messages (content is a plain string), keep it as-is so zca-js
-        // can send it as qmsg. For media messages (photo, video, etc.), store the
-        // parsed object so prepareQMSGAttach builds a correct thumbnail reference
-        // (thumb/href fields) instead of receiving a raw JSON string.
-        content:  text !== null
-          ? (msg.data.content as string)
-          : (media as Record<string, unknown>),
+        // zca-js builds qmsgAttach from object content. For group file quotes,
+        // keep the old text-only behaviour to avoid regressing file-vs-image
+        // rendering. For DM file quotes, Zalo needs the attachment object too;
+        // filename-only content produces a reply frame with no file card.
+        content:  msgType === ZALO_MSG_TYPES.FILE
+          ? (type === ThreadType.User
+              ? (media as Record<string, unknown>)
+              : (media.title ?? '[File]'))
+          : (text !== null
+              ? (msg.data.content as string)
+              : (media as Record<string, unknown>)),
         ttl:      msg.data.ttl ?? 0,
+        ...(msg.data.propertyExt ? { propertyExt: msg.data.propertyExt } : {}),
         zaloId,
         threadType: type,
       };
@@ -1717,6 +1802,21 @@ ${escapeHtml(photoCaption)}`
         console.error('[ZaloHandler] Error:', err);
       }
     }
+  };
+
+  api.listener.on('message', handleZaloMessage);
+
+  void catchUpMissedGroupMessages(api, handleZaloMessage);
+
+  // Catch-up stream from zca-js after reconnect.
+  // Replays recent messages through the same main handler to refill bridges.
+  api.listener.on('old_messages', (messages: ZaloMessage[]) => {
+    if (!Array.isArray(messages) || messages.length === 0) return;
+    const sorted = [...messages].sort((a, b) => Number(a?.data?.ts ?? 0) - Number(b?.data?.ts ?? 0));
+    console.log(`[Zalo→TG] Catch-up old_messages: replay ${sorted.length} item(s)`);
+    for (const oldMsg of sorted) {
+      api.listener.emit('message', oldMsg);
+    }
   });
 
   // Catch-up stream from zca-js after reconnect.
@@ -1879,18 +1979,21 @@ ${escapeHtml(photoCaption)}`
 
       const actorName = rawName || await resolveUserDisplayName(api, actorUid || undefined, 'ai đó');
 
-      // Aggregate reactions: update the summary entry then debounce send/edit
-      const entry = reactionSummaryStore.upsert(tgMsgId, emoji, actorName);
+      // Aggregate reactions: update the summary entry then debounce send/edit.
+      const entry = rIcon
+        ? reactionSummaryStore.upsert(tgMsgId, emoji, actorName)
+        : reactionSummaryStore.remove(tgMsgId, actorName);
+      if (!entry) return;
 
       if (entry.debounceTimer) clearTimeout(entry.debounceTimer);
       entry.debounceTimer = setTimeout(async () => {
         entry.debounceTimer = null;
-        const text = reactionSummaryStore.buildText(entry);
-        if (!text) return;
-        // Skip if text hasn't changed (same person reacting fires multiple events)
+        const text = reactionSummaryStore.buildText(entry, escapeHtml);
+        // Skip if text hasn't changed (same person reacting fires multiple events).
         if (text === entry.lastSentText) return;
         try {
           if (entry.summaryTgMsgId === null) {
+            if (!text) return;
             // First reaction: send a new reply message
             const sent = await tg.sendMessage(
               config.telegram.groupId,
@@ -1902,9 +2005,9 @@ ${escapeHtml(photoCaption)}`
               },
             );
             reactionSummaryStore.setSummaryMsgId(tgMsgId, sent.message_id);
-            entry.lastSentText = text;
-          } else {
-            // Subsequent reactions: edit the existing summary message
+            reactionSummaryStore.setLastSentText(tgMsgId, text);
+          } else if (text) {
+            // Subsequent reactions: edit the existing summary message.
             await tg.editMessageText(
               config.telegram.groupId,
               entry.summaryTgMsgId,
@@ -1912,7 +2015,19 @@ ${escapeHtml(photoCaption)}`
               text,
               { parse_mode: 'HTML' },
             );
-            entry.lastSentText = text;
+            reactionSummaryStore.setLastSentText(tgMsgId, text);
+          } else {
+            // Telegram cannot edit a message to empty text. Keep a small marker
+            // when the last reaction is removed.
+            const removedText = '❌';
+            await tg.editMessageText(
+              config.telegram.groupId,
+              entry.summaryTgMsgId,
+              undefined,
+              removedText,
+              { parse_mode: 'HTML' },
+            );
+            reactionSummaryStore.setLastSentText(tgMsgId, removedText);
           }
         } catch (editErr) {
           const msg = editErr instanceof Error ? editErr.message : String(editErr);

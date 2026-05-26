@@ -5,7 +5,7 @@ import { tgBot, syncTelegramCommands } from './telegram/bot.js';
 import { setupTelegramHandler } from './telegram/handler.js';
 import { config } from './config.js';
 import { startUpdateChecker } from './updater.js';
-import { store } from './store.js';
+import { store, flushStores } from './store.js';
 
 // ── Global safety net — prevent unhandled rejections from crashing ────────────
 process.on('unhandledRejection', (reason) => {
@@ -196,7 +196,8 @@ async function main(): Promise<void> {
     console.log(`\n[Boot] Received ${signal}, shutting down...`);
     try { const api = await getZaloApi(); api.listener.stop(); } catch { /* ignore */ }
     await tgBot.stop(signal);
-    // Wait for debounced persistence (msgStore 1000ms, userCache 2000ms) to flush
+    flushStores();
+    // Wait for debounced persistence (userCache 2000ms) to flush
     await new Promise(r => setTimeout(r, 2500));
     process.exit(0);
   };

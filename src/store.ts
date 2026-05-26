@@ -127,6 +127,13 @@ export interface ZaloQuoteData {
   msgType:  string;
   content:  string | Record<string, unknown>;
   ttl:      number;
+  propertyExt?: {
+    color: number;
+    size: number;
+    type: number;
+    subType: number;
+    ext: string;
+  };
   /** The Zalo conversation ID (group ID or peer UID) this message belongs to. */
   zaloId:   string;
   /** 0 = DM, 1 = Group */
@@ -158,7 +165,7 @@ interface MsgMapV2 {
   v: 2;
   s: string[];
   p: [string, number][];
-  q: [number, string, string, number, string, number, string | Record<string, unknown>, number, number, 0 | 1][];
+  q: [number, string, string, number, string, number, string | Record<string, unknown>, number, number, 0 | 1, ZaloQuoteData['propertyExt']?][];
 }
 type MsgMapFile = MsgMapV1 | MsgMapV2;
 
@@ -185,7 +192,7 @@ function _loadMsgMap(): MsgMapData {
       // Filter out sentinel "0" / empty pairs (came from undefined realMsgId)
       const pairs = p.filter(([k]) => k && k !== '0');
       const quotes: [number, ZaloQuoteData][] = q.map(
-        ([tgId, msgId, cliMsgId, uidIdx, ts, typeIdx, content, ttl, zaloIdx, threadType]) => [
+        ([tgId, msgId, cliMsgId, uidIdx, ts, typeIdx, content, ttl, zaloIdx, threadType, propertyExt]) => [
           tgId,
           {
             msgId,
@@ -195,6 +202,7 @@ function _loadMsgMap(): MsgMapData {
             msgType:    s[typeIdx]!,
             content,
             ttl,
+            ...(propertyExt ? { propertyExt } : {}),
             zaloId:     s[zaloIdx]!,
             threadType,
           } satisfies ZaloQuoteData,
@@ -212,53 +220,54 @@ const _pendingQuoteEchoById = new Map<string, QuoteEchoPatch>();
 const _pendingQuoteByZaloId = new Map<string, RichQuote>();
 
 let _msgPersistTimer: ReturnType<typeof setTimeout> | null = null;
+function _flushMsgPersist(): void {
+  if (_msgPersistTimer) { clearTimeout(_msgPersistTimer); _msgPersistTimer = null; }
+  try {
+    mkdirSync(path.dirname(_msgMapFile), { recursive: true });
+
+    // Build string intern table: collect all zaloId, uidFrom, msgType values
+    const _internMap = new Map<string, number>();
+    const _intern: string[] = [];
+    const _idx = (s: string): number => {
+      let i = _internMap.get(s);
+      if (i === undefined) { i = _intern.length; _internMap.set(s, i); _intern.push(s); }
+      return i;
+    };
+
+    const q: MsgMapV2['q'] = [];
+    for (const [tgId, qt] of _tgToQuote) {
+      q.push([
+        tgId,
+        qt.msgId,
+        qt.cliMsgId,
+        _idx(qt.uidFrom),
+        qt.ts,
+        _idx(qt.msgType),
+        qt.content,
+        qt.ttl,
+        _idx(qt.zaloId),
+        qt.threadType,
+      ]);
+    }
+
+    const data: MsgMapV2 = {
+      v: 2,
+      s: _intern,
+      // Skip sentinel "0" / empty keys — they carry no useful information
+      p: _msgKeyOrder.filter(k => k && k !== '0').map(k => [k, _zaloToTg.get(k)!] as [string, number]),
+      q,
+    };
+    // gzip the JSON — reduces file size ~70% with zero new deps
+    const _tmpMsg = _msgMapFile + '.tmp';
+    writeFileSync(_tmpMsg, gzipSync(JSON.stringify(data), { level: 9 }));
+    renameSync(_tmpMsg, _msgMapFile);
+  } catch (e) {
+    console.warn('[msgStore] Failed to persist msg-map:', e);
+  }
+}
 function _scheduleMsgPersist(): void {
   if (_msgPersistTimer) return;
-  _msgPersistTimer = setTimeout(() => {
-    _msgPersistTimer = null;
-    try {
-      mkdirSync(path.dirname(_msgMapFile), { recursive: true });
-
-      // Build string intern table: collect all zaloId, uidFrom, msgType values
-      const _internMap = new Map<string, number>();
-      const _intern: string[] = [];
-      const _idx = (s: string): number => {
-        let i = _internMap.get(s);
-        if (i === undefined) { i = _intern.length; _internMap.set(s, i); _intern.push(s); }
-        return i;
-      };
-
-      const q: MsgMapV2['q'] = [];
-      for (const [tgId, qt] of _tgToQuote) {
-        q.push([
-          tgId,
-          qt.msgId,
-          qt.cliMsgId,
-          _idx(qt.uidFrom),
-          qt.ts,
-          _idx(qt.msgType),
-          qt.content,
-          qt.ttl,
-          _idx(qt.zaloId),
-          qt.threadType,
-        ]);
-      }
-
-      const data: MsgMapV2 = {
-        v: 2,
-        s: _intern,
-        // Skip sentinel "0" / empty keys — they carry no useful information
-        p: _msgKeyOrder.filter(k => k && k !== '0').map(k => [k, _zaloToTg.get(k)!] as [string, number]),
-        q,
-      };
-      // gzip the JSON — reduces file size ~70% with zero new deps
-      const _tmpMsg = _msgMapFile + '.tmp';
-      writeFileSync(_tmpMsg, gzipSync(JSON.stringify(data), { level: 9 }));
-      renameSync(_tmpMsg, _msgMapFile);
-    } catch (e) {
-      console.warn('[msgStore] Failed to persist msg-map:', e);
-    }
-  }, 1000);
+  _msgPersistTimer = setTimeout(_flushMsgPersist, 1000);
 }
 
 // ── In-memory state (pre-loaded from disk) ────────────────────────────────────
@@ -446,6 +455,7 @@ export const msgStore = {
       for (const id of validIds) _pendingQuoteEchoById.delete(id);
     }, 60_000);
   },
+
 
   /**
    * Update the cliMsgId on an existing quote entry.
@@ -1047,7 +1057,73 @@ export interface ReactionSummaryEntry {
   debounceTimer: ReturnType<typeof setTimeout> | null;
 }
 
+interface ReactionSummaryDiskEntry {
+  tgMsgId: number;
+  summaryTgMsgId: number | null;
+  lastSentText: string;
+  reactions: Record<string, string[]>;
+}
+interface ReactionSummaryDisk {
+  v: 1;
+  entries: ReactionSummaryDiskEntry[];
+}
+
+const _reactionSummaryFile = path.resolve(config.dataDir, 'reaction-summaries.json.gz');
 const _reactionSummaries = new Map<number, ReactionSummaryEntry>(); // tgMsgId → entry
+let _reactionSummaryPersistTimer: ReturnType<typeof setTimeout> | null = null;
+
+function _loadReactionSummaries(): void {
+  if (!existsSync(_reactionSummaryFile)) return;
+  try {
+    const raw = JSON.parse(gunzipSync(readFileSync(_reactionSummaryFile)).toString('utf8')) as ReactionSummaryDisk;
+    for (const e of raw.entries ?? []) {
+      _reactionSummaries.set(e.tgMsgId, {
+        summaryTgMsgId: e.summaryTgMsgId ?? null,
+        lastSentText: e.lastSentText ?? '',
+        reactions: e.reactions ?? {},
+        debounceTimer: null,
+      });
+    }
+    console.log(`[reactionSummaryStore] Loaded ${_reactionSummaries.size} summaries from disk`);
+  } catch (e) {
+    console.warn('[reactionSummaryStore] Failed to load:', e);
+  }
+}
+
+function _flushReactionSummaryPersist(): void {
+  if (_reactionSummaryPersistTimer) { clearTimeout(_reactionSummaryPersistTimer); _reactionSummaryPersistTimer = null; }
+  try {
+    mkdirSync(path.dirname(_reactionSummaryFile), { recursive: true });
+    const entries: ReactionSummaryDiskEntry[] = [];
+    for (const [tgMsgId, entry] of _reactionSummaries) {
+      const reactions = Object.fromEntries(
+        Object.entries(entry.reactions)
+          .map(([emoji, names]) => [emoji, names.filter(Boolean)])
+          .filter(([, names]) => (names as string[]).length > 0),
+      ) as Record<string, string[]>;
+      if (!Object.keys(reactions).length && !entry.summaryTgMsgId) continue;
+      entries.push({ tgMsgId, summaryTgMsgId: entry.summaryTgMsgId, lastSentText: entry.lastSentText, reactions });
+    }
+    const data: ReactionSummaryDisk = { v: 1, entries };
+    const tmp = _reactionSummaryFile + '.tmp';
+    writeFileSync(tmp, gzipSync(JSON.stringify(data), { level: 9 }));
+    renameSync(tmp, _reactionSummaryFile);
+  } catch (e) {
+    console.warn('[reactionSummaryStore] Failed to persist:', e);
+  }
+}
+
+function _scheduleReactionSummaryPersist(): void {
+  if (_reactionSummaryPersistTimer) return;
+  _reactionSummaryPersistTimer = setTimeout(_flushReactionSummaryPersist, 1000);
+}
+
+_loadReactionSummaries();
+
+function cleanReactionActorName(actorName: string): string {
+  const cleaned = actorName.replace(/\s+/g, ' ').trim();
+  return cleaned || 'ai đó';
+}
 
 export const reactionSummaryStore = {
   /** Add or update a reaction. Returns the entry for this tgMsgId. */
@@ -1065,29 +1141,74 @@ export const reactionSummaryStore = {
       entry = { summaryTgMsgId: null, lastSentText: '', reactions: {}, debounceTimer: null };
       _reactionSummaries.set(tgMsgId, entry);
     }
-    if (!entry.reactions[emoji]) entry.reactions[emoji] = [];
-    if (!entry.reactions[emoji]!.includes(actorName)) {
-      entry.reactions[emoji]!.push(actorName);
+
+    const safeName = cleanReactionActorName(actorName);
+
+    // Zalo keeps one active reaction per actor per target message. If the same
+    // actor changes from ❤️ to 👍, move them instead of showing both reactions.
+    for (const [existingEmoji, names] of Object.entries(entry.reactions)) {
+      if (existingEmoji === emoji) continue;
+      const idx = names.indexOf(safeName);
+      if (idx !== -1) names.splice(idx, 1);
     }
+
+    if (!entry.reactions[emoji]) entry.reactions[emoji] = [];
+    if (!entry.reactions[emoji]!.includes(safeName)) {
+      entry.reactions[emoji]!.push(safeName);
+    }
+    _scheduleReactionSummaryPersist();
     return entry;
+  },
+
+  remove(tgMsgId: number, actorName: string): ReactionSummaryEntry | null {
+    const entry = _reactionSummaries.get(tgMsgId);
+    if (!entry) return null;
+
+    const safeName = cleanReactionActorName(actorName);
+    for (const names of Object.values(entry.reactions)) {
+      const idx = names.indexOf(safeName);
+      if (idx !== -1) names.splice(idx, 1);
+    }
+    _scheduleReactionSummaryPersist();
+    return entry;
+  },
+
+  get(tgMsgId: number): ReactionSummaryEntry | undefined {
+    return _reactionSummaries.get(tgMsgId);
   },
 
   setSummaryMsgId(tgMsgId: number, summaryMsgId: number): void {
     const entry = _reactionSummaries.get(tgMsgId);
-    if (entry) entry.summaryTgMsgId = summaryMsgId;
+    if (entry) {
+      entry.summaryTgMsgId = summaryMsgId;
+      _scheduleReactionSummaryPersist();
+    }
+  },
+
+  setLastSentText(tgMsgId: number, text: string): void {
+    const entry = _reactionSummaries.get(tgMsgId);
+    if (entry) {
+      entry.lastSentText = text;
+      _scheduleReactionSummaryPersist();
+    }
   },
 
   stats(): { entries: number } {
     return { entries: _reactionSummaries.size };
   },
 
-  buildText(entry: ReactionSummaryEntry): string {
+  buildText(entry: ReactionSummaryEntry, escape: (text: string) => string = (text) => text): string {
     return Object.entries(entry.reactions)
       .filter(([, names]) => names.length > 0)
-      .map(([emoji, names]) => `${emoji} ${names.join(', ')}`)
-      .join('  ');
+      .map(([emoji, names]) => `${escape(emoji)} ${names.map(escape).join(', ')}`)
+      .join('\n');
   },
 };
+
+export function flushStores(): void {
+  _flushMsgPersist();
+  _flushReactionSummaryPersist();
+}
 
 const REACTION_ECHO_TTL_MS = 8_000;
 const _pendingReactionEchoes = new Map<string, { count: number; ts: number }>();
