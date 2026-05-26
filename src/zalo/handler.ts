@@ -699,11 +699,15 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         // TG→Zalo media is first stored with placeholder quote data; when echo
         // arrives we replace it with real msgType/content so future replies in
         // Telegram produce native quote previews in Zalo.
-        const _tgId = msgStore.getTgMsgId(msg.data.msgId)
-          ?? (msg.data.realMsgId ? msgStore.getTgMsgId(msg.data.realMsgId) : undefined)
-          ?? ((msg.data.cliMsgId && msg.data.cliMsgId !== '0')
-            ? msgStore.getTgMsgId(msg.data.cliMsgId)
-            : undefined);
+        const selfMsgIds = [
+          msg.data.msgId,
+          msg.data.realMsgId ?? '',
+          msg.data.cliMsgId ?? '',
+        ].filter((id): id is string => Boolean(id) && id !== '0');
+
+        const _tgId = selfMsgIds
+          .map(id => msgStore.getTgMsgId(id) ?? sentMsgStore.getByZaloMsgId(id))
+          .find((id): id is number => id !== undefined);
 
         const { text: _echoText, media: _echoMedia } = parseContent(msg.data.content);
         const _echoContent = _echoText !== null ? _echoText : (_echoMedia as Record<string, unknown>);
@@ -717,23 +721,37 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         };
 
         if (_tgId !== undefined) {
+          // Update all known echo IDs for the original TG message so later
+          // reply chains can resolve by msgId, realMsgId, or cliMsgId.
+          sentMsgStore.save(_tgId, {
+            msgIds: selfMsgIds,
+            zaloId: msg.threadId,
+            threadType: msg.type as 0 | 1,
+          });
+          msgStore.attachQuote(selfMsgIds, {
+            msgId: msg.data.realMsgId && msg.data.realMsgId !== '0' ? msg.data.realMsgId : msg.data.msgId,
+            cliMsgId: msg.data.cliMsgId ?? msg.data.msgId,
+            uidFrom: msg.data.uidFrom ?? String(api.getOwnId?.() ?? ''),
+            ts: msg.data.ts,
+            msgType: msg.data.msgType ?? ZALO_MSG_TYPES.TEXT,
+            content: _echoContent,
+            ttl: msg.data.ttl ?? 0,
+            zaloId: msg.threadId,
+            threadType: msg.type as 0 | 1,
+          });
           msgStore.updateQuoteFromEcho(_tgId, _echoPatch);
         } else {
           // Echo can arrive before TG→Zalo sendMessage resolves/saves the mapping.
           // Keep it briefly and let msgStore.save() hydrate the quote later.
-          msgStore.rememberPendingQuoteEcho([
-            msg.data.msgId,
-            msg.data.realMsgId ?? '',
-            msg.data.cliMsgId ?? '',
-          ], _echoPatch);
+          msgStore.rememberPendingQuoteEcho(selfMsgIds, _echoPatch);
         }
 
-        // If this msgId is already tracked in sentMsgStore OR we're in the
+        // If any self-echo ID is already tracked in sentMsgStore OR we're in the
         // middle of sending to this Zalo thread → it's an echo, skip.
-        const isEcho = sentMsgStore.getByZaloMsgId(msg.data.msgId) !== undefined
+        const isEcho = selfMsgIds.some(id => sentMsgStore.getByZaloMsgId(id) !== undefined)
           || sentMsgStore.isSendingTo(msg.threadId);
         if (isEcho) {
-          console.log(`[Zalo→TG] Skip echo self message (${msg.data.msgId})`);
+          console.log(`[Zalo→TG] Skip echo self message (${selfMsgIds.join(', ')})`);
           return;
         }
         // Real self message from Zalo app — fall through and forward to Telegram
