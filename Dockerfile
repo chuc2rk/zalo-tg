@@ -6,8 +6,9 @@ RUN apk add --no-cache ffmpeg
 # Stage 1: Install all dependencies (including devDeps for building)
 FROM node:20-alpine AS deps
 WORKDIR /app
-# Copy package files to leverage Docker layer caching
+# Copy package files and install-time patch script to leverage Docker layer caching
 COPY package*.json ./
+COPY scripts ./scripts
 # 'npm ci' is used instead of 'npm install' for faster, reliable builds in CI/CD
 RUN npm ci
 
@@ -23,6 +24,7 @@ RUN npm run build
 FROM node:20-alpine AS prod-deps
 WORKDIR /app
 COPY package*.json ./
+COPY scripts ./scripts
 # Install only production dependencies to minimize final image size
 RUN npm ci --only=production
 
