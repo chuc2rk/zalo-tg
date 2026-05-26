@@ -497,6 +497,30 @@ function _normName(name: string): string {
     .trim();
 }
 
+function _normNameLoose(name: string): string {
+  return _normName(name)
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function _resolveUniqueLoose(rawName: string, candidates: Iterable<[string, string]>): string | undefined {
+  const needle = _normNameLoose(rawName);
+  if (!needle) return undefined;
+
+  const matches = new Set<string>();
+  for (const [normName, uid] of candidates) {
+    const looseName = _normNameLoose(normName);
+    if (!looseName) continue;
+    if (looseName === needle || looseName.startsWith(`${needle} `) || looseName.includes(` ${needle} `) || looseName.endsWith(` ${needle}`)) {
+      matches.add(uid);
+      if (matches.size > 1) return undefined;
+    }
+  }
+
+  return matches.size === 1 ? [...matches][0] : undefined;
+}
+
 // ── Persistence helpers ───────────────────────────────────────────────────────
 
 const _userCacheFile = path.resolve(config.dataDir, 'user-cache.json.gz');
@@ -600,7 +624,14 @@ export const userCache = {
   /** Resolve UID by name, preferring group-specific lookup over global. */
   resolveByNameInGroup(rawName: string, zaloId: string): string | undefined {
     const norm = _normName(rawName);
-    return _groupNameToUid.get(zaloId)?.get(norm) ?? _normToUid.get(norm);
+    const groupMembers = _groupNameToUid.get(zaloId);
+    // In groups, never let a global exact name (e.g. another user's plain "Bach")
+    // beat a unique in-group loose match (e.g. Bách(Khkt) / Nguyen Quang Bach).
+    return groupMembers?.get(norm)
+      // Allow short TG mentions like @Bách to resolve to Bách(Khkt) / Nguyen Quang Bach,
+      // but only when the match is unique in this Zalo group to avoid pinging the wrong person.
+      ?? (groupMembers ? _resolveUniqueLoose(rawName, groupMembers.entries()) : undefined)
+      ?? _normToUid.get(norm);
   },
 
   /** Get display name for a UID. */

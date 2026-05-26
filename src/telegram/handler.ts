@@ -214,7 +214,7 @@ function resolveTgMentions(
 
   // 2. Plain-text @Name patterns (only if no entity matched above)
   if (result.length === 0) {
-    const atPattern = /@([\p{L}\p{N}_]+(?:\s[\p{L}\p{N}_]+){0,3})/gu;
+    const atPattern = /@([\p{L}\p{N}_]+(?:[()\-.][\p{L}\p{N}_]+)*(?:\s[\p{L}\p{N}_]+(?:[()\-.][\p{L}\p{N}_]+)*){0,3})/gu;
     let m: RegExpExecArray | null;
     while ((m = atPattern.exec(text)) !== null) {
       const captured = m[1];
