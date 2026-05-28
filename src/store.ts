@@ -9,9 +9,19 @@ import { config } from './config.js';
  * "🗑 đã thu hồi" notifications for recalls we initiated ourselves.
  */
 export const recentlyRecalledMsgIds = new Set<string>();
+export const recentlyConfirmedRecallMsgIds = new Set<string>();
 export function markRecalled(msgId: string): void {
   recentlyRecalledMsgIds.add(msgId);
   setTimeout(() => recentlyRecalledMsgIds.delete(msgId), 5_000);
+}
+
+export function markRecallConfirmed(msgId: string): void {
+  recentlyConfirmedRecallMsgIds.add(msgId);
+  setTimeout(() => recentlyConfirmedRecallMsgIds.delete(msgId), 10_000);
+}
+
+export function wasRecallConfirmed(msgId: string): boolean {
+  return recentlyConfirmedRecallMsgIds.has(msgId);
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -983,6 +993,15 @@ export const sentMsgStore = {
 
   get(tgMsgId: number): SentMsgInfo | undefined {
     return _sentMap.get(tgMsgId);
+  },
+
+  updatePrimaryMsgId(tgMsgId: number, primaryMsgId: string | number): void {
+    const info = _sentMap.get(tgMsgId);
+    if (!info) return;
+    const primary = String(primaryMsgId);
+    const msgIds = info.msgIds.map(String);
+    const nextMsgIds = [primary, ...msgIds.filter(mid => mid !== primary)];
+    this.save(tgMsgId, { ...info, msgIds: nextMsgIds });
   },
 
   /** Build fallback quote data so Telegram replies to TG-originated messages can quote on Zalo too. */

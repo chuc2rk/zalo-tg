@@ -79,7 +79,7 @@ const execFileAsync = promisify(execFile);
 
 import type { ZaloAPI } from '../zalo/types.js';
 import { syncDmTopicNamesFromCache } from '../zalo/handler.js';
-import { store, msgStore, userCache, friendsCache, groupsCache, sentMsgStore, pollStore, mediaGroupStore, reactionEchoStore, reactionSummaryStore, reactionEventDedupeStore, aliasCache, nameCache, markRecalled, type ZaloQuoteData } from '../store.js';
+import { store, msgStore, userCache, friendsCache, groupsCache, sentMsgStore, pollStore, mediaGroupStore, reactionEchoStore, reactionSummaryStore, reactionEventDedupeStore, aliasCache, nameCache, markRecalled, wasRecallConfirmed, type ZaloQuoteData } from '../store.js';
 import { tgBot } from './bot.js';
 import { config } from '../config.js';
 import { downloadToTemp, cleanTemp, convertToM4a, extractVideoThumbnail, convertWebmToGif } from '../utils/media.js';
@@ -1106,6 +1106,11 @@ export function setupTelegramHandler(
 
   tgBot.command('recall', async (ctx) => {
     if (ctx.chat.id !== config.telegram.groupId) return;
+    const recallNotice = '<i>🗑 Tin nhắn này đã bị thu hồi trên Zalo</i>';
+    const recallNoticeOpts = (messageId: number) => ({
+      parse_mode: 'HTML' as const,
+      reply_parameters: { message_id: messageId, allow_sending_without_reply: true },
+    });
     if (!currentApi) { await ctx.reply('❌ Zalo chưa kết nối'); return; }
 
     const replyTo = 'reply_to_message' in ctx.message
@@ -1122,18 +1127,45 @@ export function setupTelegramHandler(
     if (sent) {
       const { ThreadType } = await import('zca-js');
       const zaloThreadType = sent.threadType === 1 ? ThreadType.Group : ThreadType.User;
-      try {
-        let recalled = 0;
-        for (const mid of sent.msgIds) {
-          await currentApi.undo({ msgId: mid, cliMsgId: 0 }, sent.zaloId, zaloThreadType);
-          markRecalled(String(mid));
+      const richQuote = msgStore.getQuote(replyTo.message_id);
+      const richCliMsgId = richQuote?.cliMsgId && richQuote.cliMsgId !== '0'
+        ? Number(richQuote.cliMsgId)
+        : undefined;
+      const failures: string[] = [];
+      let recalled = 0;
+
+      const recallIds = Array.from(new Set([
+        richQuote?.msgId,
+        String(sent.msgIds[0] ?? ''),
+      ].filter((id): id is string => Boolean(id) && id !== '0')));
+
+      for (const mid of recallIds) {
+        const msgId = String(mid);
+        const cliMsgId = richQuote?.msgId === msgId && richCliMsgId !== undefined
+          ? richCliMsgId
+          : 0;
+        try {
+          markRecalled(msgId);
+          await currentApi.undo({ msgId: mid, cliMsgId }, sent.zaloId, zaloThreadType);
           recalled++;
+        } catch (err) {
+          if (wasRecallConfirmed(msgId)) {
+            console.warn(`[TG→Zalo] Recall confirmed by undo event despite API error msgId=${msgId}:`, err);
+            recalled++;
+          } else {
+            console.error(`[TG→Zalo] Recall error msgId=${msgId}:`, err);
+            failures.push(`${msgId}: ${err instanceof Error ? err.message : String(err)}`);
+          }
         }
-        console.log(`[TG→Zalo] Recall ${recalled} msgIds=[${sent.msgIds}] zaloId=${sent.zaloId}`);
-        await ctx.reply(`✅ Đã thu hồi ${recalled} tin nhắn trên Zalo`);
-      } catch (err) {
-        console.error('[TG→Zalo] Recall error:', err);
-        await ctx.reply(`❌ Thu hồi thất bại: ${err instanceof Error ? err.message : String(err)}`);
+      }
+
+      console.log(`[TG→Zalo] Recall ${recalled}/${recallIds.length} msgIds=[${recallIds}] storedMsgIds=[${sent.msgIds}] zaloId=${sent.zaloId}`);
+      if (failures.length === 0) {
+        await ctx.reply(recallNotice, recallNoticeOpts(replyTo.message_id));
+      } else if (recalled > 0) {
+        await ctx.reply(`${recallNotice}\n⚠️ ${failures.length} tin liên quan chưa xác nhận.`, recallNoticeOpts(replyTo.message_id));
+      } else {
+        await ctx.reply(`❌ Thu hồi thất bại: ${failures[0]}`);
       }
       return;
     }
@@ -1147,17 +1179,22 @@ export function setupTelegramHandler(
     const { ThreadType } = await import('zca-js');
     const zaloThreadType = quote.threadType === 1 ? ThreadType.Group : ThreadType.User;
     try {
+      markRecalled(quote.msgId);
       await currentApi.undo(
         { msgId: Number(quote.msgId), cliMsgId: quote.cliMsgId ? Number(quote.cliMsgId) : 0 },
         quote.zaloId,
         zaloThreadType,
       );
-      markRecalled(quote.msgId);
       console.log(`[TG→Zalo] Recall msgId=${quote.msgId} zaloId=${quote.zaloId} (Zalo→TG)`);
-      await ctx.reply(`✅ Đã thu hồi tin nhắn trên Zalo`);
+      await ctx.reply(recallNotice, recallNoticeOpts(replyTo.message_id));
     } catch (err) {
-      console.error('[TG→Zalo] Recall error (Zalo→TG):', err);
-      await ctx.reply(`❌ Thu hồi thất bại: ${err instanceof Error ? err.message : String(err)}`);
+      if (wasRecallConfirmed(quote.msgId)) {
+        console.warn(`[TG→Zalo] Recall confirmed by undo event despite API error msgId=${quote.msgId} (Zalo→TG):`, err);
+        await ctx.reply(recallNotice, recallNoticeOpts(replyTo.message_id));
+      } else {
+        console.error('[TG→Zalo] Recall error (Zalo→TG):', err);
+        await ctx.reply(`❌ Thu hồi thất bại: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
   });
 

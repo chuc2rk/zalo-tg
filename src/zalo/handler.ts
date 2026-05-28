@@ -12,7 +12,7 @@ import { config } from '../config.js';
 import { downloadToTemp, cleanTemp } from '../utils/media.js';
 import { applyZaloMarkupHtml, formatGroupMsgHtml, formatGroupMsg, groupCaption, topicName, truncate, escapeHtml } from '../utils/format.js';
 import type { ZaloStyle } from '../utils/format.js';
-import { msgStore, userCache, pollStore, sentMsgStore, zaloAlbumStore, reactionEchoStore, reactionSummaryStore, reactionEventDedupeStore, aliasCache, friendsCache, nameCache, recentlyRecalledMsgIds, type ZaloQuoteData } from '../store.js';
+import { msgStore, userCache, pollStore, sentMsgStore, zaloAlbumStore, reactionEchoStore, reactionSummaryStore, reactionEventDedupeStore, aliasCache, friendsCache, nameCache, recentlyRecalledMsgIds, markRecallConfirmed, type ZaloQuoteData } from '../store.js';
 import { tgQueue } from '../utils/tgQueue.js';
 
 // Proxy that routes every tg.* call through the rate-limit queue
@@ -804,10 +804,15 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
           // Update all known echo IDs for the original TG message so later
           // reply chains can resolve by msgId, realMsgId, or cliMsgId.
           sentMsgStore.save(_tgId, {
+            // Keep all IDs mapped for reverse lookup, but prefer the server/global
+            // msgId first. cliMsgId may be present in self-echo and is useful for
+            // quoting, but trying to undo it as a separate message causes false
+            // partial failures (e.g. "1/2 recalled") after the real msgId succeeds.
             msgIds: selfMsgIds,
             zaloId: msg.threadId,
             threadType: msg.type as 0 | 1,
           });
+          sentMsgStore.updatePrimaryMsgId(_tgId, msg.data.realMsgId && msg.data.realMsgId !== '0' ? msg.data.realMsgId : msg.data.msgId);
           msgStore.attachQuote(selfMsgIds, {
             msgId: msg.data.realMsgId && msg.data.realMsgId !== '0' ? msg.data.realMsgId : msg.data.msgId,
             cliMsgId: msg.data.cliMsgId ?? msg.data.msgId,
@@ -1853,6 +1858,7 @@ ${escapeHtml(photoCaption)}`
 
       // Skip notification if we just initiated this recall from Telegram (prevents duplicate "🗑" message)
       if (recentlyRecalledMsgIds.has(zaloMsgId)) {
+        markRecallConfirmed(zaloMsgId);
         console.log(`[ZaloHandler] Undo: skip notification for recently-recalled msgId=${zaloMsgId}`);
         return;
       }
