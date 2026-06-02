@@ -890,10 +890,17 @@ export function setupTelegramHandler(
   // /group_info — show Zalo group metadata and member names for the current topic.
   // Usage inside a Zalo group topic: /group_info [all] [detail] or /group_infoall
   const handleGroupInfoCommand = async (ctx: Context & { message: { text?: string; message_thread_id?: number } }, forceAll = false) => {
-    if (!ctx.chat || ctx.chat.id !== config.telegram.groupId) return;
+    const chatId = ctx.chat?.id;
     const topicId = 'message_thread_id' in ctx.message
       ? (ctx.message.message_thread_id as number | undefined)
       : undefined;
+    const cmdText = ctx.message.text ?? '';
+    console.log(`[/group_info] received chat=${chatId ?? 'unknown'} topic=${topicId ?? 'none'} text="${cmdText.slice(0, 120)}"`);
+
+    if (!ctx.chat || ctx.chat.id !== config.telegram.groupId) {
+      console.log(`[/group_info] ignored: chat ${chatId ?? 'unknown'} != bridge group ${config.telegram.groupId}`);
+      return;
+    }
     const replyOpts = topicId ? { message_thread_id: topicId } : {};
 
     if (!topicId) {
@@ -902,21 +909,31 @@ export function setupTelegramHandler(
         '⚠️ Hãy gửi <code>/group_info</code> trong topic của nhóm Zalo cần xem.',
         { ...replyOpts, parse_mode: 'HTML' },
       );
+      console.log('[/group_info] replied: missing topic');
       return;
     }
 
     const entry = store.getEntryByTopic(topicId);
     if (!entry || entry.type !== 1) {
       await ctx.telegram.sendMessage(config.telegram.groupId, '❌ Topic này không phải nhóm Zalo.', replyOpts);
+      console.log(`[/group_info] replied: invalid topic topic=${topicId} entry=${entry ? JSON.stringify({ zaloId: entry.zaloId, type: entry.type, name: entry.name }) : 'none'}`);
       return;
     }
 
     if (!currentApi) {
-      await ctx.telegram.sendMessage(config.telegram.groupId, '❌ Zalo chưa kết nối', replyOpts);
+      console.log('[/group_info] currentApi is null, waiting briefly for Zalo login...');
+      const deadline = Date.now() + 15_000;
+      while (!currentApi && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+
+    if (!currentApi) {
+      await ctx.telegram.sendMessage(config.telegram.groupId, '❌ Zalo chưa kết nối. Thử lại sau khi log có “Zalo listener started ✓”.', replyOpts);
+      console.log('[/group_info] replied: currentApi is still null after wait');
       return;
     }
 
-    const cmdText = ctx.message.text ?? '';
     const showAll = forceAll || /\ball\b/i.test(cmdText);
     const showDetail = /\b(detail|details|chi\s*ti[eế]t)\b/i.test(cmdText);
     const groupId = entry.zaloId;
@@ -1036,6 +1053,7 @@ export function setupTelegramHandler(
 
       const groupName = groupData.name?.trim() || entry.name;
       const totalMember = groupData.totalMember ?? memberUids.length;
+      console.log(`[/group_info] resolved group="${groupName}" groupId=${groupId} members=${memberUids.length} total=${totalMember} showAll=${showAll} showDetail=${showDetail}`);
       const resolvedCount = members.filter(m => m.name !== m.uid).length;
       const displayLimit = showAll ? members.length : 120;
       const visibleMembers = members.slice(0, displayLimit);
@@ -1091,6 +1109,7 @@ export function setupTelegramHandler(
       if (chunk) {
         await ctx.telegram.sendMessage(config.telegram.groupId, chunk, { ...replyOpts, parse_mode: 'HTML' });
       }
+      console.log(`[/group_info] sent list groupId=${groupId} chunksDone=true`);
     } catch (err) {
       console.error('[/group_info]', err);
       await ctx.telegram.sendMessage(
@@ -2772,6 +2791,19 @@ export function setupTelegramHandler(
         }
       };
 
+      const runAttachmentInBackground = (
+        label: string,
+        task: () => Promise<void>,
+      ) => {
+        console.log(`[TG→Zalo] Queued background attachment: ${label}`);
+        void task().catch(err => {
+          console.error(`[TG→Zalo] Background attachment failed: ${label}`, err);
+        });
+      };
+
+      const shouldBackgroundAttachment = (fileSize?: number) =>
+        (fileSize ?? 0) >= 20 * 1024 * 1024;
+
       // Compute auto-mention once for this entire message (reply → prepend @Name)
       const _captionReplyMsgId = ('reply_to_message' in msg
         ? (msg as { reply_to_message?: { message_id: number } }).reply_to_message?.message_id
@@ -2914,6 +2946,12 @@ export function setupTelegramHandler(
         const doc   = msg.document;
         const fname = doc.file_name ?? `file_${Date.now()}.bin`;
         const { cap, capMentions } = getCaptionMentions();
+        if (shouldBackgroundAttachment(doc.file_size)) {
+          runAttachmentInBackground(`${fname} (${doc.file_size ?? 0} bytes)`, () =>
+            sendAttachment(doc.file_id, fname, doc.file_size, cap, capMentions),
+          );
+          return;
+        }
         await sendAttachment(doc.file_id, fname, doc.file_size, cap, capMentions);
         return;
       }
