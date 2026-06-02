@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { createWriteStream, mkdirSync, copyFileSync } from 'fs';
+import { createWriteStream, mkdirSync, copyFileSync, existsSync } from 'fs';
 import { stat, unlink } from 'fs/promises';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
@@ -7,6 +7,40 @@ import path from 'path';
 import os from 'os';
 
 const TMP_DIR = path.join(os.tmpdir(), 'zalo-tg');
+
+function configuredLocalBotApiDataDir(): string | null {
+  const raw = process.env.TGBOTAPI_DATA_DIR;
+  if (!raw || !raw.trim()) return null;
+  return path.isAbsolute(raw) ? raw : path.resolve(process.cwd(), raw);
+}
+
+function resolveLocalTelegramFilePath(srcPath: string): string {
+  if (existsSync(srcPath)) return srcPath;
+
+  // Some local Bot API deployments return file:// paths from the server/container
+  // namespace (commonly /var/lib/telegram-bot-api/...) while the bridge can only
+  // access the host-mounted data directory. Preserve the token/subdir/file suffix
+  // and remap it to TGBOTAPI_DATA_DIR before giving up.
+  const dataDir = configuredLocalBotApiDataDir();
+  if (!dataDir) return srcPath;
+
+  const marker = '/telegram-bot-api/';
+  const markerIdx = srcPath.indexOf(marker);
+  if (markerIdx >= 0) {
+    const suffix = srcPath.slice(markerIdx + marker.length);
+    const mapped = path.join(dataDir, suffix);
+    if (existsSync(mapped)) return mapped;
+  }
+
+  const parts = srcPath.split(path.sep).filter(Boolean);
+  const tokenIdx = parts.findIndex(part => /^\d+:.+/.test(part));
+  if (tokenIdx >= 0) {
+    const mapped = path.join(dataDir, ...parts.slice(tokenIdx));
+    if (existsSync(mapped)) return mapped;
+  }
+
+  return srcPath;
+}
 
 /** Keep readable Unicode filenames, but remove path/control chars unsafe on disk. */
 function sanitizeFileName(fileName: string, fallback = `download_${Date.now()}`): string {
@@ -29,7 +63,8 @@ export async function downloadToTemp(url: string, fileName?: string, retries = 3
 
   // Local Bot API server returns file:// paths — copy directly, no HTTP needed
   if (url.startsWith('file:')) {
-    const srcPath = fileURLToPath(url);
+    const originalSrcPath = fileURLToPath(url);
+    const srcPath = resolveLocalTelegramFilePath(originalSrcPath);
     const baseName = sanitizeFileName(fileName ?? path.basename(srcPath));
     const destPath = path.join(TMP_DIR, `${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${baseName}`);
     copyFileSync(srcPath, destPath);

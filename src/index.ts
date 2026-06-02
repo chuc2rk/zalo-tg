@@ -6,6 +6,8 @@ import { setupTelegramHandler } from './telegram/handler.js';
 import { config } from './config.js';
 import { startUpdateChecker } from './updater.js';
 import { store, flushStores } from './store.js';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
+import path from 'path';
 
 // ── Global safety net — prevent unhandled rejections from crashing ────────────
 process.on('unhandledRejection', (reason) => {
@@ -19,6 +21,42 @@ process.on('uncaughtException', (err) => {
 let _setZaloApi: ((api: Awaited<ReturnType<typeof getZaloApi>>) => void) | null = null;
 let _reconnectInProgress = false;
 let _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let _pidFilePath: string | null = null;
+
+function pidIsRunning(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function acquireSingleInstanceLock(): void {
+  mkdirSync(config.dataDir, { recursive: true });
+  const pidFile = path.join(config.dataDir, 'zalo-tg.pid');
+
+  if (existsSync(pidFile)) {
+    const existingPid = Number.parseInt(readFileSync(pidFile, 'utf8').trim(), 10);
+    if (existingPid !== process.pid && pidIsRunning(existingPid)) {
+      throw new Error(`Another zalo-tg instance is already running (pid=${existingPid}). Stop it before starting a new one.`);
+    }
+  }
+
+  writeFileSync(pidFile, `${process.pid}\n`, 'utf8');
+  _pidFilePath = pidFile;
+}
+
+function releaseSingleInstanceLock(): void {
+  if (!_pidFilePath) return;
+  try {
+    const existingPid = Number.parseInt(readFileSync(_pidFilePath, 'utf8').trim(), 10);
+    if (existingPid === process.pid) unlinkSync(_pidFilePath);
+  } catch {
+    // ignore stale/removed pid file
+  }
+}
 
 // ── Boot Zalo (also used when /login swaps in a fresh API) ───────────────────
 
@@ -123,6 +161,8 @@ async function startZalo(
 }
 
 async function main(): Promise<void> {
+  acquireSingleInstanceLock();
+
   console.log('╔══════════════════════════════════════╗');
   console.log('║   Zalo ↔ Telegram Bridge  v1.0.0    ║');
   console.log('╚══════════════════════════════════════╝');
@@ -197,6 +237,7 @@ async function main(): Promise<void> {
     try { const api = await getZaloApi(); api.listener.stop(); } catch { /* ignore */ }
     await tgBot.stop(signal);
     flushStores();
+    releaseSingleInstanceLock();
     // Wait for debounced persistence (userCache 2000ms) to flush
     await new Promise(r => setTimeout(r, 2500));
     process.exit(0);
@@ -208,5 +249,6 @@ async function main(): Promise<void> {
 
 main().catch((err: unknown) => {
   console.error('[Boot] Fatal error:', err);
+  releaseSingleInstanceLock();
   process.exit(1);
 });
