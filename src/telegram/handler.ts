@@ -2521,6 +2521,12 @@ export function setupTelegramHandler(
       // Ensure numeric value is correctly mapped to ThreadType enum at runtime
       const threadType: ThreadType = entry.type === 1 ? ThreadType.Group : ThreadType.User;
 
+      const isQuoteRejectedError = (err: unknown): boolean => {
+        const code = (err as { code?: number })?.code;
+        const errMsg = err instanceof Error ? err.message : String(err);
+        return code === 114 || /quote type is not available|quote.*not available|invalid quote/i.test(errMsg);
+      };
+
       // Helper: send TG error notification back to the same topic
       const notifyError = async (action: string, err: unknown) => {
         const errMsg = err instanceof Error ? err.message : String(err);
@@ -2585,15 +2591,25 @@ export function setupTelegramHandler(
               .filter(m => m.pos >= chunkOffset && m.pos < chunkOffset + chunkText.length)
               .map(m => ({ ...m, pos: m.pos - chunkOffset }));
             const useQuote = ci === 0 ? zaloQuote : undefined;
-            const sendResult = await api.sendMessage(
+            const sendTextChunk = (quote?: ZaloQuoteData) => api.sendMessage(
               {
                 msg: chunkText,
-                ...(useQuote ? { quote: useQuote } : {}),
+                ...(quote ? { quote } : {}),
                 ...(chunkMentions.length ? { mentions: chunkMentions } : {}),
               },
               zaloId,
               threadType,
             );
+            const sendResult = await sendTextChunk(useQuote).catch(async (err: unknown) => {
+              // Some Zalo messages (notably webchat/self-echo placeholders) cannot be
+              // used as native quote targets. Do not fail the whole bridge send; retry
+              // the text without quote so the message still reaches Zalo.
+              if (useQuote && isQuoteRejectedError(err)) {
+                console.warn(`[TG→Zalo] quote rejected for text msg tgMsgId=${msg.message_id} replyTo=${replyToMsgId} msgType=${useQuote.msgType}; retrying without quote`);
+                return sendTextChunk(undefined);
+              }
+              throw err;
+            });
             if (ci === 0) firstResult = sendResult;
             // Space out chunks to avoid Zalo rate limiting
             if (ci < chunks.length - 1) await new Promise(r => setTimeout(r, 500));
@@ -2719,8 +2735,8 @@ export function setupTelegramHandler(
           const sendResult = await sendMessageAttachmentSource().catch(async (err: unknown) => {
             // Code 114 with quote: quote data incompatible with this message type.
             // Retry without quote so the attachment still goes through.
-            if ((err as { code?: number })?.code === 114) {
-              console.warn('[TG→Zalo] code 114 on attachment+quote, retrying without quote');
+            if (isQuoteRejectedError(err)) {
+              console.warn('[TG→Zalo] quote rejected on attachment+quote, retrying without quote');
               return api.sendMessage(
                 {
                   msg: effectiveCaption,
