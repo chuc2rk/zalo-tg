@@ -1001,14 +1001,12 @@ ${html}`
         uidFrom:  senderUid,
         ts:       msg.data.ts,
         msgType:  msgType,
-        // zca-js builds qmsgAttach from object content. For group file quotes,
-        // keep the old text-only behaviour to avoid regressing file-vs-image
-        // rendering. For DM file quotes, Zalo needs the attachment object too;
-        // filename-only content produces a reply frame with no file card.
+        // zca-js builds qmsgAttach from object content. File quotes need the
+        // attachment object so Zalo app can render the native file preview/card.
+        // Keep the whole parsed media payload for both DM and group files; text
+        // fallback is still handled by TG→Zalo retry-without-quote on code 114.
         content:  msgType === ZALO_MSG_TYPES.FILE
-          ? (type === ThreadType.User
-              ? (media as Record<string, unknown>)
-              : (media.title ?? '[File]'))
+          ? (media as Record<string, unknown>)
           : (text !== null
               ? (msg.data.content as string)
               : (media as Record<string, unknown>)),
