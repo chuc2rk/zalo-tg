@@ -3034,13 +3034,9 @@ export function setupTelegramHandler(
         const doc   = msg.document;
         const fname = doc.file_name ?? `file_${Date.now()}.bin`;
         const { cap, capMentions } = getCaptionMentions();
-        if (shouldBackgroundAttachment(doc.file_size)) {
-          runAttachmentInBackground(`${fname} (${doc.file_size ?? 0} bytes)`, () =>
-            sendAttachment(doc.file_id, fname, doc.file_size, cap, capMentions),
-          );
-          return;
-        }
-        await sendAttachment(doc.file_id, fname, doc.file_size, cap, capMentions);
+        runAttachmentInBackground(`${fname} (${doc.file_size ?? 0} bytes)`, () =>
+          sendAttachment(doc.file_id, fname, doc.file_size, cap, capMentions),
+        );
         return;
       }
 
