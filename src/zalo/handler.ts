@@ -214,23 +214,12 @@ async function getCachedGroupInfo(
   const hit = _groupInfoCache.get(zaloId);
   if (hit && Date.now() - hit.ts < GROUP_INFO_TTL) return hit;
 
-  const appInfo = await appGetGroupInfo(zaloId);
-  if (appInfo?.name?.trim() || appInfo?.avt) {
-    const entry: GroupInfoEntry = {
-      name: appInfo.name?.trim() ?? '',
-      avt: appInfo.avt,
-      ts: Date.now(),
-    };
-    _groupInfoCache.set(zaloId, entry);
-    return entry;
-  }
-
   try {
     const appInfo = await appGetGroupInfo(zaloId);
-    if (appInfo) {
+    if (appInfo?.name?.trim() || appInfo?.avt) {
       console.log(`[API][APP] getGroupInfo group=${zaloId} source=getCachedGroupInfo`);
       const entry: GroupInfoEntry = {
-        name: appInfo.name ?? '',
+        name: appInfo.name?.trim() ?? '',
         avt:  appInfo.avt,
         ts:   Date.now(),
       };
@@ -1463,13 +1452,15 @@ ${escapeHtml(photoCaption)}`
             lng,
             { ...tgBase } as Parameters<typeof tg.sendLocation>[3],
           );
-          // Send sender name as a follow-up caption since sendLocation has no HTML caption
-            await tg.sendMessage(
-              config.telegram.groupId,
-              `${senderCaption}📍 Vị trí`,
-              { ...tgBase, parse_mode: 'HTML' },
-            );
+          // Send sender name as a follow-up caption since sendLocation has no HTML caption.
+          // Map it too, so Telegram replies to the caption can still quote the Zalo location.
+          const captionSent = await tg.sendMessage(
+            config.telegram.groupId,
+            `${senderCaption}📍 Vị trí`,
+            { ...tgBase, parse_mode: 'HTML' },
+          );
           saveTgMapping(sent);
+          saveTgMapping(captionSent);
         } else {
           // Fallback: Google Maps link
           const mapsUrl = media.href || '#';
@@ -1810,17 +1801,6 @@ ${escapeHtml(photoCaption)}`
   api.listener.on('message', handleZaloMessage);
 
   void catchUpMissedGroupMessages(api, handleZaloMessage);
-
-  // Catch-up stream from zca-js after reconnect.
-  // Replays recent messages through the same main handler to refill bridges.
-  api.listener.on('old_messages', (messages: ZaloMessage[]) => {
-    if (!Array.isArray(messages) || messages.length === 0) return;
-    const sorted = [...messages].sort((a, b) => Number(a?.data?.ts ?? 0) - Number(b?.data?.ts ?? 0));
-    console.log(`[Zalo→TG] Catch-up old_messages: replay ${sorted.length} item(s)`);
-    for (const oldMsg of sorted) {
-      api.listener.emit('message', oldMsg);
-    }
-  });
 
   // Catch-up stream from zca-js after reconnect.
   // Replays recent messages through the same main handler to refill bridges.

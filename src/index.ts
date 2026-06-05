@@ -9,12 +9,19 @@ import { store, flushStores } from './store.js';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import path from 'path';
 
-// ── Global safety net — prevent unhandled rejections from crashing ────────────
+function cleanupAndExit(code: number): never {
+  try { flushStores(); } catch { /* ignore */ }
+  try { releaseSingleInstanceLock(); } catch { /* ignore */ }
+  process.exit(code);
+}
+
+// ── Global safety net — log async errors; crash/restart on fatal exceptions ───
 process.on('unhandledRejection', (reason) => {
-  console.error('[Boot] Unhandled rejection (ignored):', reason);
+  console.error('[Boot] Unhandled rejection:', reason);
 });
 process.on('uncaughtException', (err) => {
-  console.error('[Boot] Uncaught exception (ignored):', err);
+  console.error('[Boot] Uncaught exception:', err);
+  cleanupAndExit(1);
 });
 
 // ── Module-level ref to Telegram handler's API setter (used by reconnect) ──────
@@ -83,7 +90,9 @@ async function startZalo(
   api: Awaited<ReturnType<typeof getZaloApi>>,
   isReconnect = false,
 ): Promise<void> {
-  if (!isReconnect) void pruneLeftGroupTopics(api);
+  if (!isReconnect) {
+    pruneLeftGroupTopics(api).catch(err => console.warn('[Boot] pruneLeftGroupTopics error:', err));
+  }
   await setupZaloHandler(api);
   if (isReconnect) {
     api.listener.once('connected', () => {
@@ -249,6 +258,5 @@ async function main(): Promise<void> {
 
 main().catch((err: unknown) => {
   console.error('[Boot] Fatal error:', err);
-  releaseSingleInstanceLock();
-  process.exit(1);
+  cleanupAndExit(1);
 });

@@ -99,6 +99,22 @@ import { triggerUpdateCheck } from '../updater.js';
 // Bridge start time (module load = process start)
 const _bridgeStartTime = Date.now();
 
+// Defensive dedupe for Telegram updates. During reconnect/reload accidents, the
+// same Telegraf message handler can be registered twice; never bridge one TG
+// message_id to Zalo more than once in the same process.
+const _recentTgMessageIds = new Map<number, number>();
+const TG_MESSAGE_DEDUPE_TTL_MS = 2 * 60 * 1000;
+
+function shouldSkipDuplicateTgMessage(messageId: number): boolean {
+  const now = Date.now();
+  for (const [id, ts] of _recentTgMessageIds) {
+    if (now - ts > TG_MESSAGE_DEDUPE_TTL_MS) _recentTgMessageIds.delete(id);
+  }
+  if (_recentTgMessageIds.has(messageId)) return true;
+  _recentTgMessageIds.set(messageId, now);
+  return false;
+}
+
 /** Lấy trạng thái chi tiết của local Bot API server */
 async function getLocalApiStatus(serverUrl: string): Promise<string> {
   const lines: string[] = [];
@@ -2495,6 +2511,10 @@ export function setupTelegramHandler(
       if (ctx.from?.is_bot) return;
       // Only handle messages from our bridge group
       if (ctx.chat.id !== config.telegram.groupId) return;
+      if (shouldSkipDuplicateTgMessage(msg.message_id)) {
+        console.warn(`[TG→Zalo] Skip duplicate Telegram message_id=${msg.message_id}`);
+        return;
+      }
 
       // Must originate from a topic (all bridged conversations live in topics)
       const topicId =

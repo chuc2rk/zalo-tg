@@ -697,6 +697,22 @@ function _loadNameCache(): NameCacheFile {
 }
 
 let _nameCache = _loadNameCache();
+const _nameNormToUid = new Map<string, string>();
+
+function _indexNameCacheEntry(entry: NameCacheEntry): void {
+  for (const name of [entry.alias, entry.contactName, entry.profileName]) {
+    const norm = name?.trim() ? _normName(name) : '';
+    if (norm && !_nameNormToUid.has(norm)) _nameNormToUid.set(norm, entry.userId);
+  }
+}
+
+function _rebuildNameCacheIndex(): void {
+  _nameNormToUid.clear();
+  for (const entry of Object.values(_nameCache.users)) _indexNameCacheEntry(entry);
+}
+
+_rebuildNameCacheIndex();
+
 let _namePersistTimer: ReturnType<typeof setTimeout> | null = null;
 function _persistNameCacheSoon(): void {
   if (_namePersistTimer) return;
@@ -722,6 +738,7 @@ function _upsertNameCache(userId: string, patch: Partial<Omit<NameCacheEntry, 'u
   if (patch.contactName !== undefined) next.contactName = patch.contactName.trim() || undefined;
   if (patch.profileName !== undefined) next.profileName = patch.profileName.trim() || undefined;
   _nameCache.users[cleanUid] = next;
+  _rebuildNameCacheIndex();
   _persistNameCacheSoon();
   return next;
 }
@@ -763,13 +780,7 @@ export const nameCache = {
   },
 
   resolveByName(rawName: string): string | undefined {
-    const norm = _normName(rawName);
-    for (const [uid, e] of Object.entries(_nameCache.users)) {
-      if ((e.alias && _normName(e.alias) === norm)
-        || (e.contactName && _normName(e.contactName) === norm)
-        || (e.profileName && _normName(e.profileName) === norm)) return uid;
-    }
-    return undefined;
+    return _nameNormToUid.get(_normName(rawName));
   },
 
   stats(): { users: number; manualAliases: number; contacts: number; profiles: number } {
@@ -858,12 +869,14 @@ const FRIENDS_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 let _friends:    ZaloFriend[] = [];
 let _friendsTs:  number       = 0;
+let _friendsById = new Map<string, ZaloFriend>();
 
 export const friendsCache = {
   /** Store a fresh friends list. */
   set(list: ZaloFriend[]): void {
     _friends   = list;
     _friendsTs = Date.now();
+    _friendsById = new Map(list.map(friend => [friend.userId, friend]));
     for (const friend of list) upsertAliasFromFriend(friend);
   },
 
@@ -889,7 +902,7 @@ export const friendsCache = {
   },
 
   get(userId: string): ZaloFriend | undefined {
-    return _friends.find(f => f.userId === userId);
+    return _friendsById.get(userId);
   },
 
   stats(): { count: number } {
