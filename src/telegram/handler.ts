@@ -2547,6 +2547,25 @@ export function setupTelegramHandler(
         return code === 114 || /quote type is not available|quote.*not available|invalid quote/i.test(errMsg);
       };
 
+      const ZALO_SEND_TIMEOUT_MS = 90_000;
+      const withZaloTimeout = async <T>(
+        task: () => Promise<T>,
+        label: string,
+        timeoutMs = ZALO_SEND_TIMEOUT_MS,
+      ): Promise<T> => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          return await Promise.race([
+            task(),
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(() => reject(new Error(`Timeout after ${timeoutMs}ms: ${label}`)), timeoutMs);
+            }),
+          ]);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      };
+
       // Helper: send TG error notification back to the same topic
       const notifyError = async (action: string, err: unknown) => {
         const errMsg = err instanceof Error ? err.message : String(err);
@@ -2620,13 +2639,19 @@ export function setupTelegramHandler(
               zaloId,
               threadType,
             );
-            const sendResult = await sendTextChunk(useQuote).catch(async (err: unknown) => {
+            const sendResult = await withZaloTimeout(
+              () => sendTextChunk(useQuote),
+              `sendMessage(text chunk ${ci + 1}/${chunks.length})`,
+            ).catch(async (err: unknown) => {
               // Some Zalo messages (notably webchat/self-echo placeholders) cannot be
               // used as native quote targets. Do not fail the whole bridge send; retry
               // the text without quote so the message still reaches Zalo.
               if (useQuote && isQuoteRejectedError(err)) {
                 console.warn(`[TG→Zalo] quote rejected for text msg tgMsgId=${msg.message_id} replyTo=${replyToMsgId} msgType=${useQuote.msgType}; retrying without quote`);
-                return sendTextChunk(undefined);
+                return withZaloTimeout(
+                  () => sendTextChunk(undefined),
+                  `sendMessage(text chunk ${ci + 1}/${chunks.length}) retryWithoutQuote`,
+                );
               }
               throw err;
             });
@@ -2752,19 +2777,25 @@ export function setupTelegramHandler(
             threadType,
           );
 
-          const sendResult = await sendMessageAttachmentSource().catch(async (err: unknown) => {
+          const sendResult = await withZaloTimeout(
+            sendMessageAttachmentSource,
+            `sendAttachment(${filename})`,
+          ).catch(async (err: unknown) => {
             // Code 114 with quote: quote data incompatible with this message type.
             // Retry without quote so the attachment still goes through.
             if (isQuoteRejectedError(err)) {
               console.warn('[TG→Zalo] quote rejected on attachment+quote, retrying without quote');
-              return api.sendMessage(
-                {
-                  msg: effectiveCaption,
-                  attachments: attachmentSource,
-                  ...(captionMentions?.length ? { mentions: captionMentions } : {}),
-                },
-                zaloId,
-                threadType,
+              return withZaloTimeout(
+                () => api.sendMessage(
+                  {
+                    msg: effectiveCaption,
+                    attachments: attachmentSource,
+                    ...(captionMentions?.length ? { mentions: captionMentions } : {}),
+                  },
+                  zaloId,
+                  threadType,
+                ),
+                `sendAttachment(${filename}) retryWithoutQuote`,
               );
             }
             throw err;
@@ -2786,7 +2817,10 @@ export function setupTelegramHandler(
             const buildFallbackFileQuoteContent = async (): Promise<string | Record<string, unknown>> => {
               if (!isGenericFile) return caption ?? '';
               try {
-                const uploads = uploadedForQuote ?? await api.uploadAttachment(attachmentSource, zaloId, threadType);
+                const uploads = uploadedForQuote ?? await withZaloTimeout(
+                  () => api.uploadAttachment(attachmentSource, zaloId, threadType) as Promise<UploadAttachmentType[]>,
+                  `buildFileQuote(${filename}) uploadAttachment`,
+                );
                 uploadedForQuote = uploads;
                 const uploaded = uploads[0];
                 if (uploaded?.fileType === 'others' || uploaded?.fileType === 'video') {
@@ -2844,8 +2878,12 @@ export function setupTelegramHandler(
         });
       };
 
-      const shouldBackgroundAttachment = (fileSize?: number) =>
-        (fileSize ?? 0) >= 20 * 1024 * 1024;
+      // Always send TG attachments in the background. Zalo uploads can hang long
+      // enough to exceed Telegraf's middleware timeout (90s), which makes the
+      // bridge look frozen even though the process stays alive. The attachment
+      // task still reports errors via notifyError(), but it no longer blocks the
+      // Telegram update pipeline.
+      const shouldBackgroundAttachment = (_fileSize?: number) => true;
 
       // Compute auto-mention once for this entire message (reply → prepend @Name)
       const _captionReplyMsgId = ('reply_to_message' in msg
@@ -2906,15 +2944,18 @@ export function setupTelegramHandler(
           if (localPaths.length === 0) return;
           sentMsgStore.markSending(meta.zaloId);
           try {
-            const sendResult = await api.sendMessage(
-              {
-                msg: caption,
-                attachments: localPaths,
-                ...(zaloQuote ? { quote: zaloQuote } : {}),
-                ...(capMentions?.length ? { mentions: capMentions } : {}),
-              },
-              meta.zaloId,
-              meta.threadType === 1 ? ThreadType.Group : ThreadType.User,
+            const sendResult = await withZaloTimeout(
+              () => api.sendMessage(
+                {
+                  msg: caption,
+                  attachments: localPaths,
+                  ...(zaloQuote ? { quote: zaloQuote } : {}),
+                  ...(capMentions?.length ? { mentions: capMentions } : {}),
+                },
+                meta.zaloId,
+                meta.threadType === 1 ? ThreadType.Group : ThreadType.User,
+              ) as Promise<{ message?: { msgId?: number } | null; attachment?: Array<{ msgId?: number }> }>,
+              `sendMediaGroup(${localPaths.length} files)`,
             );
             const zaloMsgIds: (string | number)[] = [];
             if (sendResult?.message?.msgId != null) zaloMsgIds.push(sendResult.message.msgId);
@@ -2968,20 +3009,24 @@ export function setupTelegramHandler(
             mediaGroupId,
             { fileId: photo.file_id, fname: 'photo.jpg', fileSize: photo.file_size, caption: cap, captionMentions: capMentions, tgMsgId: msg.message_id },
             { topicId, zaloId, threadType: entry.type, replyToMsgId },
-            (items, meta) => { void flushMediaGroup(items, meta); },
+            (items, meta) => runAttachmentInBackground(`mediaGroup:${mediaGroupId} (${items.length} items)`, () => flushMediaGroup(items, meta)),
           );
           // eslint-disable-next-line @typescript-eslint/no-unused-vars
           void _api; // keep reference
           return;
         }
-        await sendAttachment(photo.file_id, 'photo.jpg', photo.file_size, cap, capMentions);
+        runAttachmentInBackground(`photo.jpg (${photo.file_size ?? 0} bytes)`, () =>
+          sendAttachment(photo.file_id, 'photo.jpg', photo.file_size, cap, capMentions),
+        );
         return;
       }
 
       if ('animation' in msg && msg.animation) {
         const fname = msg.animation.file_name ?? 'animation.gif';
         const { cap, capMentions } = getCaptionMentions();
-        await sendAttachment(msg.animation.file_id, fname, msg.animation.file_size, cap, capMentions);
+        runAttachmentInBackground(`${fname} (${msg.animation.file_size ?? 0} bytes)`, () =>
+          sendAttachment(msg.animation.file_id, fname, msg.animation.file_size, cap, capMentions),
+        );
         return;
       }
 
@@ -3010,11 +3055,12 @@ export function setupTelegramHandler(
             mediaGroupId,
             { fileId: vid.file_id, fname, fileSize: vid.file_size, caption: cap, captionMentions: capMentions, tgMsgId: msg.message_id },
             { topicId, zaloId, threadType: entry.type, replyToMsgId },
-            (items, meta) => { void flushMediaGroup(items, meta); },
+            (items, meta) => runAttachmentInBackground(`mediaGroup:${mediaGroupId} (${items.length} items)`, () => flushMediaGroup(items, meta)),
           );
           return;
         }
 
+        runAttachmentInBackground(`${fname} (${vid.file_size ?? 0} bytes)`, async () => {
         // Download video → upload to Zalo CDN → send as inline playable video
         if ((vid.file_size ?? 0) > TG_FILE_LIMIT) {
           await notifyTooBig(fname, vid.file_size);
@@ -3035,7 +3081,10 @@ export function setupTelegramHandler(
 
           // Upload video to Zalo CDN
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const videoUploads: any[] = await api.uploadAttachment([localVideoPath], zaloId, threadType);
+          const videoUploads: any[] = await withZaloTimeout(
+            () => api.uploadAttachment([localVideoPath], zaloId, threadType),
+            `sendVideo(${fname}) uploadAttachment`,
+          );
           const videoUpload = videoUploads?.find((r: { fileType?: string }) => r.fileType === 'video') as
             { fileUrl?: string } | undefined;
 
@@ -3050,7 +3099,10 @@ export function setupTelegramHandler(
           if (localThumbPath) {
             try {
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              const thumbUploads: any[] = await api.uploadAttachment([localThumbPath], zaloId, threadType);
+              const thumbUploads: any[] = await withZaloTimeout(
+                () => api.uploadAttachment([localThumbPath!], zaloId, threadType),
+                `sendVideo(${fname}) uploadThumbnail`,
+              );
               const tu = thumbUploads?.[0] as { normalUrl?: string } | undefined;
               if (tu?.normalUrl) thumbUrl = tu.normalUrl;
             } catch { /* keep fallback thumbUrl */ }
@@ -3059,17 +3111,20 @@ export function setupTelegramHandler(
           sentMsgStore.markSending(zaloId);
           try {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const result = await (api.sendVideo as (...a: any[]) => Promise<{ msgId?: number }>)(
-              {
-                videoUrl:     videoUpload.fileUrl,
-                thumbnailUrl: thumbUrl,
-                width:        vid.width,
-                height:       vid.height,
-                duration:     (vid.duration ?? 0) * 1000,
-                msg:          cap ?? '',
-              },
-              zaloId,
-              threadType,
+            const result = await withZaloTimeout(
+              () => (api.sendVideo as (...a: any[]) => Promise<{ msgId?: number }>)(
+                {
+                  videoUrl:     videoUpload.fileUrl,
+                  thumbnailUrl: thumbUrl,
+                  width:        vid.width,
+                  height:       vid.height,
+                  duration:     (vid.duration ?? 0) * 1000,
+                  msg:          cap ?? '',
+                },
+                zaloId,
+                threadType,
+              ),
+              `sendVideo(${fname})`,
             );
             if (result?.msgId !== undefined) {
               sentMsgStore.save(msg.message_id, { msgIds: [result.msgId], zaloId, threadType });
@@ -3097,118 +3152,132 @@ export function setupTelegramHandler(
           await cleanTemp(localVideoPath);
           if (localThumbPath) await cleanTemp(localThumbPath);
         }
+        });
         return;
       }
 
       if ('voice' in msg && msg.voice) {
-        // Telegram voice notes are always small (<1 min OGG Opus), well under 20 MB
-        if ((msg.voice.file_size ?? 0) > TG_FILE_LIMIT) {
-          await notifyTooBig(`voice_${Date.now()}.ogg`, msg.voice.file_size);
-          return;
-        }
-        // Download OGG from TG, convert to M4A, upload to Zalo, send as voice bubble
-        let fileLink: URL;
-        try { fileLink = await ctx.telegram.getFileLink(msg.voice.file_id); }
-        catch (err: unknown) {
-          const isTooBig = err instanceof Error && err.message.includes('file is too big');
-          if (isTooBig) { await notifyTooBig(`voice_${Date.now()}.ogg`, msg.voice.file_size); return; }
-          throw err;
-        }
-        const oggPath  = await downloadToTemp(fileLink.toString(), `voice_${Date.now()}.ogg`);
-        let m4aPath: string | undefined;
-        try {
-          m4aPath = await convertToM4a(oggPath);
-          // Upload to Zalo CDN to get a voiceUrl
-          const uploaded = await api.uploadAttachment(m4aPath, zaloId, threadType) as Array<{ fileUrl?: string }>;
-          const voiceUrl = uploaded[0]?.fileUrl;
-          if (!voiceUrl) throw new Error('No fileUrl from uploadAttachment');
-          console.log(`[TG→Zalo] Sending voice → ${voiceUrl}`);
-          // Zalo mobile relies heavily on duration metadata for native voice UX.
-          // Keep the value in milliseconds to match zca-js video/voice internals.
-          const voiceDurationMs = Math.max(0, (msg.voice.duration ?? 0) * 1000);
-          const voiceResult = await api.sendVoice(
-            voiceDurationMs > 0 ? { voiceUrl, duration: voiceDurationMs } : { voiceUrl },
-            zaloId,
-            threadType,
-          ) as Record<string, unknown>;
-          const voiceMsgId = voiceResult?.msgId ?? (voiceResult?.message as Record<string, unknown> | undefined)?.msgId;
-          if (voiceMsgId != null && !Number.isNaN(Number(voiceMsgId))) {
-            sentMsgStore.save(msg.message_id, { msgIds: [Number(voiceMsgId)], zaloId, threadType });
-            const ownUid = String(api.getOwnId?.() ?? '');
-            msgStore.save(msg.message_id, [String(voiceMsgId)], {
-              msgId: String(voiceMsgId),
-              cliMsgId: '',
-              uidFrom: ownUid,
-              ts: String(Math.floor(Date.now() / 1000)),
-              msgType: 'webchat',
-              content: '[Voice]',
-              ttl: 0,
-              zaloId,
-              threadType: entry.type,
-            });
+        const voice = msg.voice;
+        const voiceFilename = `voice_${Date.now()}.ogg`;
+        runAttachmentInBackground(`${voiceFilename} (${voice.file_size ?? 0} bytes)`, async () => {
+          // Telegram voice notes are always small (<1 min OGG Opus), well under 20 MB
+          if ((voice.file_size ?? 0) > TG_FILE_LIMIT) {
+            await notifyTooBig(voiceFilename, voice.file_size);
+            return;
           }
-          console.log(`[TG→Zalo] Voice sent OK`);
-        } catch (err) {
-          console.error('[TG→Zalo] Voice convert/send failed, falling back to file:', err);
-          await sendAttachment(msg.voice.file_id, `voice_${Date.now()}.ogg`);
-        } finally {
-          await cleanTemp(oggPath);
-          if (m4aPath) await cleanTemp(m4aPath);
-        }
+          // Download OGG from TG, convert to M4A, upload to Zalo, send as voice bubble
+          let fileLink: URL;
+          try { fileLink = await ctx.telegram.getFileLink(voice.file_id); }
+          catch (err: unknown) {
+            const isTooBig = err instanceof Error && err.message.includes('file is too big');
+            if (isTooBig) { await notifyTooBig(voiceFilename, voice.file_size); return; }
+            throw err;
+          }
+          const oggPath  = await downloadToTemp(fileLink.toString(), voiceFilename);
+          let m4aPath: string | undefined;
+          try {
+            m4aPath = await convertToM4a(oggPath);
+            // Upload to Zalo CDN to get a voiceUrl
+            const uploaded = await withZaloTimeout(
+              () => api.uploadAttachment(m4aPath!, zaloId, threadType),
+              `sendVoice(${voiceFilename}) uploadAttachment`,
+            ) as Array<{ fileUrl?: string }>;
+            const voiceUrl = uploaded[0]?.fileUrl;
+            if (!voiceUrl) throw new Error('No fileUrl from uploadAttachment');
+            console.log(`[TG→Zalo] Sending voice → ${voiceUrl}`);
+            // Zalo mobile relies heavily on duration metadata for native voice UX.
+            // Keep the value in milliseconds to match zca-js video/voice internals.
+            const voiceDurationMs = Math.max(0, (voice.duration ?? 0) * 1000);
+            const voiceResult = await withZaloTimeout(
+              () => api.sendVoice(
+                voiceDurationMs > 0 ? { voiceUrl, duration: voiceDurationMs } : { voiceUrl },
+                zaloId,
+                threadType,
+              ),
+              `sendVoice(${voiceFilename})`,
+            ) as Record<string, unknown>;
+            const voiceMsgId = voiceResult?.msgId ?? (voiceResult?.message as Record<string, unknown> | undefined)?.msgId;
+            if (voiceMsgId != null && !Number.isNaN(Number(voiceMsgId))) {
+              sentMsgStore.save(msg.message_id, { msgIds: [Number(voiceMsgId)], zaloId, threadType });
+              const ownUid = String(api.getOwnId?.() ?? '');
+              msgStore.save(msg.message_id, [String(voiceMsgId)], {
+                msgId: String(voiceMsgId),
+                cliMsgId: '',
+                uidFrom: ownUid,
+                ts: String(Math.floor(Date.now() / 1000)),
+                msgType: 'webchat',
+                content: '[Voice]',
+                ttl: 0,
+                zaloId,
+                threadType: entry.type,
+              });
+            }
+            console.log(`[TG→Zalo] Voice sent OK`);
+          } catch (err) {
+            console.error('[TG→Zalo] Voice convert/send failed, falling back to file:', err);
+            await sendAttachment(voice.file_id, voiceFilename);
+          } finally {
+            await cleanTemp(oggPath);
+            if (m4aPath) await cleanTemp(m4aPath);
+          }
+        });
         return;
       }
 
       if ('sticker' in msg && msg.sticker) {
         const sticker = msg.sticker;
-        if (sticker.is_video) {
-          // Video sticker (.webm) → convert to GIF so Zalo shows an animation
-          let webmPath: string | null = null;
-          let gifPath:  string | null = null;
-          try {
-            const fileLink = await ctx.telegram.getFileLink(sticker.file_id);
-            webmPath = await downloadToTemp(fileLink.toString(), `sticker_${Date.now()}.webm`);
-            gifPath  = await convertWebmToGif(webmPath);
-            sentMsgStore.markSending(zaloId);
+        runAttachmentInBackground(`sticker_${Date.now()}`, async () => {
+          if (sticker.is_video) {
+            // Video sticker (.webm) → convert to GIF so Zalo shows an animation
+            let webmPath: string | null = null;
+            let gifPath:  string | null = null;
             try {
-              const sendResult = await api.sendMessage(
-                { msg: '', attachments: [gifPath] }, zaloId, threadType,
-              ) as { message?: { msgId?: number } | null; attachment?: Array<{ msgId?: number }> };
-              const zaloMsgId = sendResult?.message?.msgId ?? sendResult?.attachment?.[0]?.msgId;
-              if (zaloMsgId !== undefined) {
-                sentMsgStore.save(msg.message_id, { msgIds: [zaloMsgId], zaloId, threadType });
-                const ownUid = String(api.getOwnId?.() ?? '');
-                msgStore.save(msg.message_id, [String(zaloMsgId)], {
-                  msgId: String(zaloMsgId),
-                  cliMsgId: '',
-                  uidFrom: ownUid,
-                  ts: String(Math.floor(Date.now() / 1000)),
-                  msgType: 'webchat',
-                  content: '[Sticker]',
-                  ttl: 0,
-                  zaloId,
-                  threadType: entry.type,
-                });
+              const fileLink = await ctx.telegram.getFileLink(sticker.file_id);
+              webmPath = await downloadToTemp(fileLink.toString(), `sticker_${Date.now()}.webm`);
+              gifPath  = await convertWebmToGif(webmPath);
+              sentMsgStore.markSending(zaloId);
+              try {
+                const sendResult = await withZaloTimeout(
+                  () => api.sendMessage({ msg: '', attachments: [gifPath!] }, zaloId, threadType),
+                  'sendSticker(video)',
+                ) as { message?: { msgId?: number } | null; attachment?: Array<{ msgId?: number }> };
+                const zaloMsgId = sendResult?.message?.msgId ?? sendResult?.attachment?.[0]?.msgId;
+                if (zaloMsgId !== undefined) {
+                  sentMsgStore.save(msg.message_id, { msgIds: [zaloMsgId], zaloId, threadType });
+                  const ownUid = String(api.getOwnId?.() ?? '');
+                  msgStore.save(msg.message_id, [String(zaloMsgId)], {
+                    msgId: String(zaloMsgId),
+                    cliMsgId: '',
+                    uidFrom: ownUid,
+                    ts: String(Math.floor(Date.now() / 1000)),
+                    msgType: 'webchat',
+                    content: '[Sticker]',
+                    ttl: 0,
+                    zaloId,
+                    threadType: entry.type,
+                  });
+                }
+              } finally {
+                sentMsgStore.unmarkSending(zaloId);
               }
+            } catch (err) {
+              console.error('[TG→Zalo] sticker webm→gif failed, falling back to thumbnail:', err);
+              // Fallback: send jpg thumbnail
+              const thumbId = sticker.thumbnail?.file_id;
+              if (thumbId) await sendAttachment(thumbId, `sticker_${Date.now()}.jpg`);
             } finally {
-              sentMsgStore.unmarkSending(zaloId);
+              if (webmPath) await cleanTemp(webmPath);
+              if (gifPath)  await cleanTemp(gifPath);
             }
-          } catch (err) {
-            console.error('[TG→Zalo] sticker webm→gif failed, falling back to thumbnail:', err);
-            // Fallback: send jpg thumbnail
-            const thumbId = sticker.thumbnail?.file_id;
-            if (thumbId) await sendAttachment(thumbId, `sticker_${Date.now()}.jpg`);
-          } finally {
-            if (webmPath) await cleanTemp(webmPath);
-            if (gifPath)  await cleanTemp(gifPath);
+          } else {
+            // Animated sticker (.tgs/Lottie) → no lightweight converter, use jpg thumbnail
+            // Static sticker (.webp) → send as-is
+            const useThumb = sticker.is_animated && sticker.thumbnail;
+            const fileId   = useThumb ? sticker.thumbnail!.file_id : sticker.file_id;
+            const ext      = useThumb ? '.jpg' : '.webp';
+            await sendAttachment(fileId, `sticker_${Date.now()}${ext}`);
           }
-        } else {
-          // Animated sticker (.tgs/Lottie) → no lightweight converter, use jpg thumbnail
-          // Static sticker (.webp) → send as-is
-          const useThumb = sticker.is_animated && sticker.thumbnail;
-          const fileId   = useThumb ? sticker.thumbnail!.file_id : sticker.file_id;
-          const ext      = useThumb ? '.jpg' : '.webp';
-          await sendAttachment(fileId, `sticker_${Date.now()}${ext}`);
-        }
+        });
         return;
       }
 
@@ -3223,14 +3292,17 @@ export function setupTelegramHandler(
 
         try {
           // 1. Create poll on Zalo
-          const created = await api.createPoll(
-            {
-              question:         tgPoll.question,
-              options:          tgPoll.options.map((o: { text: string }) => o.text),
-              isAnonymous:      false,   // force non-anonymous so poll_answer fires
-              allowMultiChoices: tgPoll.allows_multiple_answers ?? false,
-            },
-            zaloId,
+          const created = await withZaloTimeout(
+            () => api.createPoll(
+              {
+                question:         tgPoll.question,
+                options:          tgPoll.options.map((o: { text: string }) => o.text),
+                isAnonymous:      false,   // force non-anonymous so poll_answer fires
+                allowMultiChoices: tgPoll.allows_multiple_answers ?? false,
+              },
+              zaloId,
+            ) as Promise<{ poll_id?: number; options?: Array<{ option_id?: number; content: string; votes?: number }> }>,
+            'createPoll',
           );
           console.log(`[TG→Zalo] Zalo poll created: pollId=${created?.poll_id}`);
 
@@ -3314,10 +3386,13 @@ export function setupTelegramHandler(
           : `📍 ${mapsUrl}`;
         sentMsgStore.markSending(zaloId);
         try {
-          const result = await api.sendMessage(
-            { msg: locationLabel, ...(zaloQuote ? { quote: zaloQuote } : {}) },
-            zaloId,
-            threadType,
+          const result = await withZaloTimeout(
+            () => api.sendMessage(
+              { msg: locationLabel, ...(zaloQuote ? { quote: zaloQuote } : {}) },
+              zaloId,
+              threadType,
+            ),
+            'sendLocation',
           ) as { message?: { msgId?: number } };
           const zaloMsgId = result?.message?.msgId;
           if (zaloMsgId !== undefined) {
@@ -3356,7 +3431,10 @@ export function setupTelegramHandler(
         if (!cardSent) {
           sentMsgStore.markSending(zaloId);
           try {
-            const result = await api.sendMessage({ msg: `👤 ${fullName} — ${contact.phone_number}` }, zaloId, threadType) as { message?: { msgId?: number } };
+            const result = await withZaloTimeout(
+              () => api.sendMessage({ msg: `👤 ${fullName} — ${contact.phone_number}` }, zaloId, threadType),
+              'sendContact',
+            ) as { message?: { msgId?: number } };
             const zaloMsgId = result?.message?.msgId;
             if (zaloMsgId !== undefined) {
               sentMsgStore.save(msg.message_id, { msgIds: [zaloMsgId], zaloId, threadType });
