@@ -5,6 +5,7 @@ import {
   applyMentionsHtml,
   applyZaloMarkupHtml,
   senderBadge,
+  senderMarker,
   formatGroupMsg,
   formatGroupMsgHtml,
   groupCaption,
@@ -99,29 +100,36 @@ describe('applyZaloMarkupHtml', () => {
   });
 });
 
-describe('sender scan badge', () => {
+describe('sender scan marker', () => {
   it('is deterministic for the same key', () => {
     expect(senderBadge('Tấn Lê', 'uid-1')).toBe(senderBadge('Tấn Lê', 'uid-1'));
+    expect(senderMarker('Tấn Lê', 'uid-1')).toBe(senderMarker('Tấn Lê', 'uid-1'));
   });
 
-  it('keeps the same visual symbol when only the resolved display name changes', () => {
+  it('keeps the same visual marker when only the resolved display name changes', () => {
     expect(senderBadge('Tấn Lê', 'uid-1')).toBe(senderBadge('Lê Tấn', 'uid-1'));
+    expect(senderMarker('Tấn Lê', 'uid-1')).toBe(senderMarker('Lê Tấn', 'uid-1'));
   });
 
-  it('returns only the emoji badge without initials', () => {
+  it('returns compact visual markers without initials', () => {
     expect(senderBadge('Tấn Lê', 'uid-1')).toMatch(/^\S+$/u);
-    expect(senderBadge('Tấn Lê', 'uid-1')).not.toContain('TL');
+    expect(senderMarker('Tấn Lê', 'uid-1')).toMatch(/^\S+$/u);
+    expect(senderMarker('Tấn Lê', 'uid-1')).not.toContain('TL');
+  });
+
+  it('adds a secondary shape to reduce same-colour collisions', () => {
+    expect(senderMarker('Tấn Lê', 'uid-1').length).toBeGreaterThan(senderBadge('Tấn Lê', 'uid-1').length);
   });
 });
 
 describe('formatGroupMsg', () => {
-  it('formats with sender badge, sender name, and content', () => {
-    expect(formatGroupMsg('Alice', 'Hello', 'uid-a')).toMatch(/^\S+ <b>Alice:<\/b>\nHello$/u);
+  it('formats with sender marker, sender name, separator, and content', () => {
+    expect(formatGroupMsg('Alice', 'Hello', 'uid-a')).toMatch(/^\S+ <b>ALICE<\/b>\n━━━━━━━━\nHello$/u);
   });
 
   it('escapes sender name and content', () => {
     const result = formatGroupMsg('A < B', 'x & y', 'uid-a');
-    expect(result).toContain('<b>A &lt; B:</b>');
+    expect(result).toContain('<b>A &lt; B</b>');
     expect(result).toContain('x &amp; y');
   });
 
@@ -135,13 +143,17 @@ describe('formatGroupMsg', () => {
 
 describe('formatGroupMsgHtml', () => {
   it('wraps sender in bold with pre-escaped body', () => {
-    expect(formatGroupMsgHtml('Alice', '<b>Hello</b>', 'uid-a')).toMatch(/^\S+ <b>Alice:<\/b>\n<b>Hello<\/b>$/u);
+    expect(formatGroupMsgHtml('Alice', '<b>Hello</b>', 'uid-a')).toMatch(/^\S+ <b>ALICE<\/b>\n━━━━━━━━\n<b>Hello<\/b>$/u);
   });
 });
 
 describe('groupCaption', () => {
-  it('returns sender badge plus bold sender name', () => {
-    expect(groupCaption('Alice', 'uid-a')).toMatch(/^\S+ <b>Alice<\/b>$/u);
+  it('returns sender marker plus bold uppercase sender name', () => {
+    expect(groupCaption('Alice', 'uid-a')).toMatch(/^\S+ <b>ALICE<\/b>$/u);
+  });
+
+  it('uppercases Vietnamese sender names for media captions', () => {
+    expect(groupCaption('Nguyễn Văn A', 'uid-a')).toContain('<b>NGUYỄN VĂN A</b>');
   });
 });
 

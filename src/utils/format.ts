@@ -130,7 +130,9 @@ export function applyZaloMarkupHtml(
   return result;
 }
 
-const SENDER_BADGES = ['🔵', '🟢', '🟣', '🟠', '🔴', '🟡', '⚫', '⚪', '🟤', '🔷', '🔶', '🔹', '🔸', '🟦', '🟩', '🟪', '🟧', '🟥', '🟨', '⬛', '⬜'] as const;
+const SENDER_BADGES = ['🟦', '🟩', '🟪', '🟧', '🟥', '🟨', '🔵', '🟢', '🟣', '🟠', '🔴', '🟡', '🔷', '🔶', '🔹', '🔸', '⬛', '⬜', '🟤'] as const;
+const SENDER_ACCENTS = ['▌', '●', '◆', '■', '▲', '✦', '✚', '⬢'] as const;
+const GROUP_MESSAGE_SEPARATOR = '━━━━━━━━';
 
 function stableHash(text: string): number {
   let hash = 2166136261;
@@ -141,25 +143,49 @@ function stableHash(text: string): number {
   return hash >>> 0;
 }
 
-/** Stable, compact visual badge for a Zalo sender. */
-export function senderBadge(senderName: string, stableKey = senderName): string {
-  // Keep the visual badge stable per person. Prefer immutable IDs (Zalo uid)
+function senderHash(senderName: string, stableKey = senderName): number {
+  // Keep the visual marker stable per person. Prefer immutable IDs (Zalo uid)
   // over display names, because names can resolve differently across message types.
   const key = stableKey || senderName || 'unknown';
-  return SENDER_BADGES[stableHash(key) % SENDER_BADGES.length];
+  return stableHash(key);
+}
+
+/** Stable, compact visual badge for a Zalo sender. */
+export function senderBadge(senderName: string, stableKey = senderName): string {
+  return SENDER_BADGES[senderHash(senderName, stableKey) % SENDER_BADGES.length];
+}
+
+/** Stronger per-sender marker for Telegram group threads.
+ *
+ * Telegram messages sent by the bridge all share the same bot avatar/name, and
+ * Telegram Bot API does not support arbitrary text colours. Use a stable colour
+ * emoji plus a secondary shape so people can scan a busy Zalo group quickly even
+ * when two senders collide on the same colour.
+ */
+export function senderMarker(senderName: string, stableKey = senderName): string {
+  const hash = senderHash(senderName, stableKey);
+  const badge = SENDER_BADGES[hash % SENDER_BADGES.length];
+  const accent = SENDER_ACCENTS[Math.floor(hash / SENDER_BADGES.length) % SENDER_ACCENTS.length];
+  return `${badge}${accent}`;
 }
 
 export function senderLabel(senderName: string, stableKey?: string): string {
-  return `${senderBadge(senderName, stableKey)} ${truncate(senderName, 64)}`;
+  return `${senderMarker(senderName, stableKey)} ${truncate(senderName, 64)}`;
+}
+
+function senderHeader(senderName: string, stableKey?: string): string {
+  const displayName = truncate(senderName, 64).toLocaleUpperCase('vi-VN');
+  return `${escapeHtml(senderMarker(senderName, stableKey))} <b>${escapeHtml(displayName)}</b>`;
 }
 
 /**
- * Format a group message as:
- *   🔵 <b>SenderName:</b>
+ * Format a group message as a visually-scannable sender block:
+ *   🟪◆ <b>SenderName</b>
+ *   ━━━━━━━━
  *   content…
  */
 export function formatGroupMsg(senderName: string, content: string, stableKey?: string): string {
-  return `${escapeHtml(senderBadge(senderName, stableKey))} <b>${escapeHtml(truncate(senderName, 64))}:</b>\n${escapeHtml(truncate(content))}`;
+  return `${senderHeader(senderName, stableKey)}\n${GROUP_MESSAGE_SEPARATOR}\n${escapeHtml(truncate(content))}`;
 }
 
 /**
@@ -167,12 +193,13 @@ export function formatGroupMsg(senderName: string, content: string, stableKey?: 
  * have already been wrapped in <b> tags).
  */
 export function formatGroupMsgHtml(senderName: string, bodyHtml: string, stableKey?: string): string {
-  return `${escapeHtml(senderBadge(senderName, stableKey))} <b>${escapeHtml(truncate(senderName, 64))}:</b>\n${bodyHtml}`;
+  return `${senderHeader(senderName, stableKey)}\n${GROUP_MESSAGE_SEPARATOR}\n${bodyHtml}`;
 }
 
-/** Caption for group media. Includes a stable sender badge for scanability. */
+/** Caption for group media. Includes a stable sender marker for scanability. */
 export function groupCaption(senderName: string, stableKey?: string): string {
-  return `${escapeHtml(senderBadge(senderName, stableKey))} <b>${escapeHtml(truncate(senderName, 64))}</b>`;
+  const displayName = truncate(senderName, 64).toLocaleUpperCase('vi-VN');
+  return `${escapeHtml(senderMarker(senderName, stableKey))} <b>${escapeHtml(displayName)}</b>`;
 }
 
 /**
