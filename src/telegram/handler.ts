@@ -109,6 +109,7 @@ const execFileAsync = promisify(execFile);
 import type { ZaloAPI } from '../zalo/types.js';
 import { syncDmTopicNamesFromCache } from '../zalo/handler.js';
 import { store, msgStore, userCache, friendsCache, groupsCache, sentMsgStore, pollStore, mediaGroupStore, reactionEchoStore, reactionSummaryStore, reactionEventDedupeStore, aliasCache, nameCache, markRecalled, wasRecallConfirmed, type ZaloQuoteData } from '../store.js';
+import { getAutoReplyState, setAutoReplyEnabled } from '../zalo/autoReply.js';
 import { tgBot } from './bot.js';
 import { config } from '../config.js';
 import { downloadToTemp, cleanTemp, convertToM4a, extractVideoThumbnail, convertWebmToGif } from '../utils/media.js';
@@ -1167,6 +1168,142 @@ export function setupTelegramHandler(
 
   tgBot.command('group_info', async (ctx) => handleGroupInfoCommand(ctx));
   tgBot.command('group_infoall', async (ctx) => handleGroupInfoCommand(ctx, true));
+
+  // /history [N] — backfill old GROUP chat history into the current topic.
+  // Zalo's API only exposes group history (getGroupChatHistory); 1-1 DM history
+  // is not retrievable, so this is rejected for DM topics.
+  tgBot.command('history', async (ctx) => {
+    if (ctx.chat.id !== config.telegram.groupId) return;
+    const topicId = 'message_thread_id' in ctx.message
+      ? (ctx.message.message_thread_id as number | undefined)
+      : undefined;
+    const replyOpts = topicId ? { message_thread_id: topicId } : {};
+
+    if (!topicId) {
+      await ctx.telegram.sendMessage(
+        config.telegram.groupId,
+        '⚠️ Hãy gửi <code>/history</code> trong topic của nhóm Zalo cần lấy lịch sử.',
+        { ...replyOpts, parse_mode: 'HTML' },
+      );
+      return;
+    }
+
+    const entry = store.getEntryByTopic(topicId);
+    if (!entry) {
+      await ctx.telegram.sendMessage(config.telegram.groupId, '❌ Topic này chưa được map.', replyOpts);
+      return;
+    }
+    if (entry.type !== 1) {
+      await ctx.telegram.sendMessage(
+        config.telegram.groupId,
+        '⚠️ Zalo chỉ cho lấy lịch sử của <b>nhóm</b>. Tin nhắn riêng (DM) cũ không lấy được qua API.',
+        { ...replyOpts, parse_mode: 'HTML' },
+      );
+      return;
+    }
+    if (!currentApi) {
+      await ctx.telegram.sendMessage(config.telegram.groupId, '❌ Zalo chưa kết nối', replyOpts);
+      return;
+    }
+
+    const arg = (ctx.message.text ?? '').split(/\s+/)[1];
+    let count = Number.parseInt(arg ?? '', 10);
+    if (!Number.isFinite(count) || count <= 0) count = 30;
+    count = Math.min(count, 50);
+
+    try {
+      await ctx.telegram.sendMessage(
+        config.telegram.groupId,
+        `⏳ Đang lấy ${count} tin nhắn gần nhất của nhóm...`,
+        replyOpts,
+      );
+      const res = await currentApi.getGroupChatHistory(entry.zaloId, count) as { groupMsgs?: unknown[] };
+      const msgs = Array.isArray(res?.groupMsgs) ? res.groupMsgs : [];
+      if (msgs.length === 0) {
+        await ctx.telegram.sendMessage(config.telegram.groupId, 'ℹ️ Không có tin nhắn lịch sử nào.', replyOpts);
+        return;
+      }
+      // Oldest → newest so the replayed order matches a natural conversation.
+      const sorted = [...msgs].sort(
+        (a, b) => Number((a as { data?: { ts?: unknown } })?.data?.ts ?? 0)
+          - Number((b as { data?: { ts?: unknown } })?.data?.ts ?? 0),
+      );
+      // Reuse the live message pipeline; already-synced messages dedupe themselves.
+      for (const m of sorted) {
+        currentApi.listener.emit('message', m);
+        await new Promise(r => setTimeout(r, 300)); // keep order + avoid rate limiting
+      }
+      await ctx.telegram.sendMessage(
+        config.telegram.groupId,
+        `✅ Đã nạp ${sorted.length} tin nhắn lịch sử (tin đã đồng bộ sẽ tự bỏ qua).`,
+        replyOpts,
+      );
+    } catch (err) {
+      console.error('[/history]', err);
+      await ctx.telegram.sendMessage(
+        config.telegram.groupId,
+        `❌ Lỗi lấy lịch sử: ${escapeHtml(err instanceof Error ? err.message : String(err))}`,
+        { ...replyOpts, parse_mode: 'HTML' },
+      );
+    }
+  });
+
+  // /autoreply on <message> | off | status — bridge-level offline auto-reply (DMs only).
+  tgBot.command('autoreply', async (ctx) => {
+    if (ctx.chat.id !== config.telegram.groupId) return;
+    const topicId = 'message_thread_id' in ctx.message
+      ? (ctx.message.message_thread_id as number | undefined)
+      : undefined;
+    const replyOpts = topicId ? { message_thread_id: topicId } : {};
+
+    const rest = (ctx.message.text ?? '').replace(/^\/autoreply(?:@\S+)?\s*/i, '').trim();
+    const [sub, ...msgParts] = rest.split(/\s+/);
+    const subCmd = (sub ?? '').toLowerCase();
+
+    if (!subCmd || subCmd === 'status') {
+      const s = getAutoReplyState();
+      await ctx.telegram.sendMessage(
+        config.telegram.groupId,
+        `🤖 <b>Auto-reply</b>: ${s.enabled ? '🟢 BẬT' : '🔴 TẮT'}\n`
+        + (s.message ? `Nội dung: <i>${escapeHtml(s.message)}</i>` : 'Chưa đặt nội dung.')
+        + `\n\nDùng:\n<code>/autoreply on &lt;nội dung&gt;</code>\n<code>/autoreply off</code>`,
+        { ...replyOpts, parse_mode: 'HTML' },
+      );
+      return;
+    }
+
+    if (subCmd === 'off') {
+      setAutoReplyEnabled(false);
+      await ctx.telegram.sendMessage(config.telegram.groupId, '🔴 Đã TẮT auto-reply.', replyOpts);
+      return;
+    }
+
+    if (subCmd === 'on') {
+      const message = msgParts.join(' ').trim() || getAutoReplyState().message;
+      if (!message) {
+        await ctx.telegram.sendMessage(
+          config.telegram.groupId,
+          '⚠️ Cần nội dung. Ví dụ: <code>/autoreply on Mình đang bận, sẽ trả lời sau nhé!</code>',
+          { ...replyOpts, parse_mode: 'HTML' },
+        );
+        return;
+      }
+      setAutoReplyEnabled(true, message);
+      await ctx.telegram.sendMessage(
+        config.telegram.groupId,
+        `🟢 Đã BẬT auto-reply.\nNội dung: <i>${escapeHtml(message)}</i>\n\n`
+        + `<i>Chỉ tự trả lời tin nhắn riêng (DM), mỗi người tối đa 1 lần / 10 phút.</i>`,
+        { ...replyOpts, parse_mode: 'HTML' },
+      );
+      return;
+    }
+
+    await ctx.telegram.sendMessage(
+      config.telegram.groupId,
+      '❓ Dùng: <code>/autoreply on &lt;nội dung&gt;</code> | <code>/autoreply off</code> | <code>/autoreply status</code>',
+      { ...replyOpts, parse_mode: 'HTML' },
+    );
+  });
 
   tgBot.command('recall', async (ctx) => {
     if (ctx.chat.id !== config.telegram.groupId) return;

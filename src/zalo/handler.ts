@@ -14,6 +14,7 @@ import { applyZaloMarkupHtml, formatGroupMsgHtml, formatGroupMsg, groupCaption, 
 import type { ZaloStyle } from '../utils/format.js';
 import { msgStore, userCache, pollStore, sentMsgStore, zaloAlbumStore, reactionEchoStore, reactionSummaryStore, reactionEventDedupeStore, aliasCache, friendsCache, nameCache, recentlyRecalledMsgIds, markRecallConfirmed, type ZaloQuoteData } from '../store.js';
 import { tgQueue } from '../utils/tgQueue.js';
+import { maybeAutoReply } from './autoReply.js';
 
 // Proxy that routes every tg.* call through the rate-limit queue
 // so 429 errors are auto-retried instead of crashing the process.
@@ -728,6 +729,8 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
   }
   void (async () => {
     for (let i = 0; i < startupGroups.length; i++) {
+      // Actually space the calls; keep fork's configurable delay and loaded-set
+      // guard so unscheduled/failed groups can still lazy-load on first message.
       if (i > 0) await new Promise(r => setTimeout(r, config.zalo.startupMemberPreloadDelayMs));
       const groupId = startupGroups[i].zaloId;
       if (_memberCacheLoaded.has(groupId)) continue;
@@ -883,6 +886,12 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
       if (type === 1 && !_memberCacheLoaded.has(zaloId)) {
         _memberCacheLoaded.add(zaloId);
         void populateGroupMemberCache(api, zaloId);
+      }
+
+      // Auto-reply (offline mode): answer incoming DMs when enabled.
+      // Fire-and-forget; only 1-1 threads are answered (see autoReply.ts).
+      if (!msg.isSelf) {
+        void maybeAutoReply(api, zaloId, type);
       }
 
       // Parse content early so we can start media download in parallel with topic resolution
