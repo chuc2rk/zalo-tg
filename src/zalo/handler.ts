@@ -674,6 +674,31 @@ function normalizeHistoryMessage(raw: unknown, groupId: string): HistoricalZaloM
   };
 }
 
+/** The active 'message' handler, captured so /history can replay messages
+ *  through the exact same pipeline AND await each one (guaranteeing order,
+ *  which `listener.emit` cannot since the handler is async and not awaited). */
+let _activeMessageHandler: ((msg: ZaloMessage | HistoricalZaloMessage) => Promise<void>) | null = null;
+
+/**
+ * Replay messages through the live message pipeline, one at a time, awaiting
+ * each so they render to Telegram in the given order. Returns the count
+ * processed. Used by the /history backfill command.
+ */
+export async function replayHistoryMessages(messages: ZaloMessage[], gapMs = 250): Promise<number> {
+  const handler = _activeMessageHandler;
+  if (!handler) return 0;
+  let processed = 0;
+  for (const msg of messages) {
+    try {
+      await handler(msg);
+      processed++;
+    } catch (err) {
+      console.warn('[replayHistory] handler error:', err);
+    }
+    if (gapMs > 0) await new Promise(r => setTimeout(r, gapMs));
+  }
+  return processed;
+}
 
 async function catchUpMissedGroupMessages(
   api: ZaloAPI,
@@ -729,11 +754,13 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
   }
   void (async () => {
     for (let i = 0; i < startupGroups.length; i++) {
-      // Actually space the calls; keep fork's configurable delay and loaded-set
-      // guard so unscheduled/failed groups can still lazy-load on first message.
-      if (i > 0) await new Promise(r => setTimeout(r, config.zalo.startupMemberPreloadDelayMs));
       const groupId = startupGroups[i].zaloId;
+      // A live message may have already warmed this group via the lazy path
+      // during the stagger window — don't redo it, and don't mark groups
+      // "loaded" up-front for groups whose cache hasn't actually populated yet.
       if (_memberCacheLoaded.has(groupId)) continue;
+      // Keep fork's configurable delay instead of upstream's hard-coded 2s.
+      if (i > 0) await new Promise(r => setTimeout(r, config.zalo.startupMemberPreloadDelayMs));
       _memberCacheLoaded.add(groupId);
       void populateGroupMemberCache(api, groupId);
     }
@@ -779,7 +806,7 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
     console.warn('[Zalo] Failed to load address-book names:', err);
   }
 
-  const handleZaloMessage = async (msg: HistoricalZaloMessage | ZaloMessage) => {
+  const handleZaloMessage = async (msg: HistoricalZaloMessage | ZaloMessage): Promise<void> => {
     try {
       // Skip TG→Zalo echo (re-emitted by Zalo server) but forward
       // real self messages sent directly from the Zalo app.
@@ -888,9 +915,10 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         void populateGroupMemberCache(api, zaloId);
       }
 
-      // Auto-reply (offline mode): answer incoming DMs when enabled.
+      // Auto-reply (offline mode): answer incoming text DMs when enabled.
       // Fire-and-forget; only 1-1 threads are answered (see autoReply.ts).
-      if (!msg.isSelf) {
+      // Gate on TEXT so we never auto-reply to stickers/media/system events.
+      if (!msg.isSelf && msgType === ZALO_MSG_TYPES.TEXT) {
         void maybeAutoReply(api, zaloId, type);
       }
 
@@ -1834,6 +1862,7 @@ ${escapeHtml(photoCaption)}`
     }
   };
 
+  _activeMessageHandler = handleZaloMessage;
   api.listener.on('message', handleZaloMessage);
 
   void catchUpMissedGroupMessages(api, handleZaloMessage);
