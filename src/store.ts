@@ -1433,7 +1433,7 @@ interface ZaloAlbumBuffer {
   urls:       string[];
   senderName: string;
   topicId:    number;
-  tgBase:     { message_thread_id: number; reply_parameters?: { message_id: number; allow_sending_without_reply: boolean } };
+  tgBase:     { message_thread_id: number; reply_parameters?: { message_id: number; allow_sending_without_reply: boolean }; disable_notification?: boolean };
   zaloMsgIds: string[];
   zaloQuote:  ZaloQuoteData | undefined;
 }

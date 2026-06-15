@@ -249,7 +249,7 @@ interface ZaloMuteEntry {
 }
 
 const MUTED_GROUPS_TTL = 60 * 1000; // 1 min
-let _mutedGroupsCache: { ids: Set<string>; ts: number } | null = null;
+let _mutedCache: { groups: Set<string>; peers: Set<string>; ts: number } | null = null;
 
 function isActiveMute(entry: ZaloMuteEntry): boolean {
   if (entry.duration === -1) return true;
@@ -260,27 +260,44 @@ function isActiveMute(entry: ZaloMuteEntry): boolean {
   return now < expiresAt;
 }
 
-async function isMutedZaloGroup(api: ZaloAPI, groupId: string): Promise<boolean> {
-  if (!config.zalo.skipMutedGroups) return false;
-
-  const cached = _mutedGroupsCache;
-  if (cached && Date.now() - cached.ts < MUTED_GROUPS_TTL) {
-    return cached.ids.has(groupId);
-  }
+/**
+ * Currently-muted Zalo thread ids, split into groups and DM peers, cached for a
+ * minute. getMute() returns `groupChatEntries` (groups) and `chatEntries` (DMs).
+ */
+async function getMutedZaloIds(api: ZaloAPI): Promise<{ groups: Set<string>; peers: Set<string> }> {
+  const cached = _mutedCache;
+  if (cached && Date.now() - cached.ts < MUTED_GROUPS_TTL) return cached;
 
   try {
-    const muteInfo = await api.getMute() as { groupChatEntries?: ZaloMuteEntry[] };
-    const mutedIds = new Set(
-      (muteInfo.groupChatEntries ?? [])
-        .filter(isActiveMute)
-        .map(entry => String(entry.id)),
-    );
-    _mutedGroupsCache = { ids: mutedIds, ts: Date.now() };
-    return mutedIds.has(groupId);
+    const muteInfo = await api.getMute() as {
+      groupChatEntries?: ZaloMuteEntry[];
+      chatEntries?: ZaloMuteEntry[];
+    };
+    const groups = new Set((muteInfo.groupChatEntries ?? []).filter(isActiveMute).map(e => String(e.id)));
+    const peers  = new Set((muteInfo.chatEntries ?? []).filter(isActiveMute).map(e => String(e.id)));
+    _mutedCache = { groups, peers, ts: Date.now() };
+    return _mutedCache;
   } catch (err) {
-    console.warn('[Zalo→TG] Failed to check muted Zalo groups; forwarding message:', err);
-    return false;
+    console.warn('[Zalo→TG] Failed to fetch Zalo mute state:', err);
+    return { groups: new Set(), peers: new Set() };
   }
+}
+
+/** Skip-muted-groups behavior (opt-in): drop messages from muted Zalo groups. */
+async function isMutedZaloGroup(api: ZaloAPI, groupId: string): Promise<boolean> {
+  if (!config.zalo.skipMutedGroups) return false;
+  return (await getMutedZaloIds(api)).groups.has(groupId);
+}
+
+/**
+ * Mirror Zalo's "mute notifications" onto Telegram: a thread muted on Zalo is
+ * delivered silently (disable_notification) — the message still arrives, it just
+ * doesn't ping. Covers both groups and DMs.
+ */
+async function isMutedOnZalo(api: ZaloAPI, threadId: string, type: 0 | 1): Promise<boolean> {
+  if (!config.zalo.muteSilentMirror) return false;
+  const { groups, peers } = await getMutedZaloIds(api);
+  return type === 1 ? groups.has(threadId) : peers.has(threadId);
 }
 
 // In-flight topic creation promises — prevents duplicate topic creation when
@@ -858,6 +875,10 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         return;
       }
 
+      // Mirror Zalo's mute → deliver this thread silently on Telegram. Computed
+      // once here (before any message-type branch) so every send path can use it.
+      const silent = await isMutedOnZalo(api, zaloId, type);
+
       // Pre-populate member cache the first time we see a new group
       if (type === 1 && !_memberCacheLoaded.has(zaloId)) {
         _memberCacheLoaded.add(zaloId);
@@ -961,10 +982,12 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
       const tgBase: {
         message_thread_id: number;
         reply_parameters?: { message_id: number; allow_sending_without_reply: boolean };
+        disable_notification?: boolean;
       } = { message_thread_id: topicId };
       if (tgReplyMsgId !== undefined) {
         tgBase.reply_parameters = { message_id: tgReplyMsgId, allow_sending_without_reply: true };
       }
+      if (silent) tgBase.disable_notification = true;
 
       // Preserve the old DM notification behavior: any incoming Zalo DM is
       // forwarded inside its Telegram topic with @chuc2rk prefixed, so Telegram
@@ -1175,7 +1198,7 @@ ${escapeHtml(photoCaption)}`
                   const sentMsgs = await tg.sendMediaGroup(
                     config.telegram.groupId,
                     mediaItems,
-                    { message_thread_id: buf.topicId } as Parameters<typeof tg.sendMediaGroup>[2],
+                    { ...buf.tgBase, message_thread_id: buf.topicId } as Parameters<typeof tg.sendMediaGroup>[2],
                   );
                   // Save mapping for every photo so replying to ANY album photo
                   // produces a valid Zalo quote
@@ -1543,7 +1566,7 @@ ${escapeHtml(photoCaption)}`
           const tgScoreMsg = await tg.sendMessage(
             config.telegram.groupId,
             scoreText,
-            { message_thread_id: topicId, parse_mode: 'HTML' },
+            { message_thread_id: topicId, parse_mode: 'HTML', disable_notification: silent },
           );
 
           pollStore.save({
@@ -1757,6 +1780,7 @@ ${escapeHtml(photoCaption)}`
               {
                 message_thread_id: topicId,
                 parse_mode: 'HTML',
+                disable_notification: silent,
               },
             );
             continue;
@@ -1769,6 +1793,7 @@ ${escapeHtml(photoCaption)}`
               message_thread_id: topicId,
               parse_mode: 'HTML',
               reply_parameters: { message_id: tgMsgId, allow_sending_without_reply: true },
+              disable_notification: silent,
             },
           );
           console.log(`[ZaloHandler] chat.delete: notified TG msg ${tgMsgId} deleted by ${delActorName} (${delActorUid})`);
