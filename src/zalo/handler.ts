@@ -2271,4 +2271,81 @@ ${escapeHtml(photoCaption)}`
       console.error('[ZaloHandler] FriendEvent error:', err);
     }
   });
+
+  // ── Typing indicator (đang soạn tin) ───────────────────────────────────────
+  // Zalo fires `typing` repeatedly (every ~1s) while someone is composing.
+  // We mirror it into the matching Telegram topic via sendChatAction, whose
+  // "typing" status auto-clears after ~5s — so we only need to refresh it
+  // occasionally. Throttle per-thread to avoid hammering the Telegram API.
+  //
+  // Direction is Zalo→Telegram only: this handler never sends anything back to
+  // Zalo, so it adds zero outbound traffic and no account-ban risk.
+  const TYPING_THROTTLE_MS = 4000;
+  const lastTypingForwardedAt = new Map<string, number>();
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  api.listener.on('typing', async (typing: any) => {
+    try {
+      const zaloId = String(typing?.threadId ?? typing?.data?.gid ?? typing?.data?.uid ?? '');
+      if (!zaloId) return;
+
+      const type = (typing?.type === ThreadType.Group || typing?.data?.gid) ? 1 : 0;
+      const topicId = store.getTopicByZalo(zaloId, type as 0 | 1);
+      if (topicId === undefined) return; // only surface typing for known conversations
+
+      const now = Date.now();
+      if (now - (lastTypingForwardedAt.get(zaloId) ?? 0) < TYPING_THROTTLE_MS) return;
+      lastTypingForwardedAt.set(zaloId, now);
+
+      await tg.sendChatAction(config.telegram.groupId, 'typing', { message_thread_id: topicId });
+    } catch (err) {
+      console.warn('[ZaloHandler] Typing error:', err);
+    }
+  });
+
+  // ── Seen indicator (đã xem) ────────────────────────────────────────────────
+  // When the other side reads a message we sent from Telegram, Zalo emits
+  // `seen_messages`. We mark the corresponding Telegram message with a 👀
+  // reaction so the user can tell their message was read — mirroring Zalo's
+  // "Đã xem". Each Telegram message is marked at most once.
+  //
+  // Direction is Zalo→Telegram only (read-only on the Zalo side).
+  const SEEN_DEDUPE_MAX = 2000;
+  const seenMarkedTgMsgIds = new Set<number>();
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  api.listener.on('seen_messages', async (messages: any[]) => {
+    if (!Array.isArray(messages) || messages.length === 0) return;
+    for (const m of messages) {
+      try {
+        const data = m?.data ?? {};
+        // Resolve the Zalo message id the peer just read, then map it back to
+        // the Telegram message that originated it.
+        const candidates = [data.msgId, data.realMsgId]
+          .map((id: unknown) => (id === undefined || id === null ? '' : String(id).trim()))
+          .filter((id: string) => id && id !== '0');
+
+        let tgMsgId: number | undefined;
+        for (const id of candidates) {
+          tgMsgId = sentMsgStore.getByZaloMsgId(id) ?? msgStore.getTgMsgId(id);
+          if (tgMsgId !== undefined) break;
+        }
+        if (tgMsgId === undefined || seenMarkedTgMsgIds.has(tgMsgId)) continue;
+
+        // Bound the dedupe set so it can't grow without limit.
+        if (seenMarkedTgMsgIds.size >= SEEN_DEDUPE_MAX) {
+          seenMarkedTgMsgIds.clear();
+        }
+        seenMarkedTgMsgIds.add(tgMsgId);
+
+        await tg.setMessageReaction(
+          config.telegram.groupId,
+          tgMsgId,
+          [{ type: 'emoji', emoji: '👀' }],
+        );
+      } catch (err) {
+        console.warn('[ZaloHandler] Seen error:', err);
+      }
+    }
+  });
 }
