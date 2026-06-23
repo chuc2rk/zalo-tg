@@ -2813,6 +2813,7 @@ export function setupTelegramHandler(
       };
 
       const ZALO_SEND_TIMEOUT_MS = 90_000;
+      const ZALO_ATTACHMENT_TIMEOUT_MAX_MS = 30 * 60_000;
       const withZaloTimeout = async <T>(
         task: () => Promise<T>,
         label: string,
@@ -2829,6 +2830,14 @@ export function setupTelegramHandler(
         } finally {
           if (timer) clearTimeout(timer);
         }
+      };
+
+      const attachmentTimeoutMs = (fileSize?: number): number => {
+        if (!fileSize || fileSize <= 0) return ZALO_SEND_TIMEOUT_MS;
+        const sizeMb = fileSize / 1024 / 1024;
+        // Keep normal sends protected by the 90s guard, but allow very large
+        // files enough time to upload to Zalo. Example: 800 MB gets ~27 minutes.
+        return Math.min(ZALO_ATTACHMENT_TIMEOUT_MAX_MS, Math.max(ZALO_SEND_TIMEOUT_MS, ZALO_SEND_TIMEOUT_MS + sizeMb * 2_000));
       };
 
       // Helper: send TG error notification back to the same topic
@@ -3050,9 +3059,11 @@ export function setupTelegramHandler(
             threadType,
           );
 
+          const timeoutMs = attachmentTimeoutMs(fileSize);
           const sendResult = await withZaloTimeout(
             sendMessageAttachmentSource,
             `sendAttachment(${filename})`,
+            timeoutMs,
           ).catch(async (err: unknown) => {
             // Code 114 with quote: quote data incompatible with this message type.
             // Retry without quote so the attachment still goes through.
@@ -3069,6 +3080,7 @@ export function setupTelegramHandler(
                   threadType,
                 ),
                 `sendAttachment(${filename}) retryWithoutQuote`,
+                timeoutMs,
               );
             }
             throw err;
