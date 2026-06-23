@@ -1330,6 +1330,35 @@ export function setupTelegramHandler(
       }
     }
 
+    // Fallback: try username search if query is not a phone number
+    try {
+      const user = await currentApi.findUserByUsername(query) as {
+        uid?: string;
+        display_name?: string;
+        zalo_name?: string;
+      } | undefined;
+
+      if (user?.uid) {
+        const displayName = user.display_name || user.zalo_name || `Zalo ${user.uid}`;
+        const existingTopicId = store.getTopicByZalo(user.uid, 0);
+        const button: { text: string; callback_data: string } = existingTopicId !== undefined
+          ? { text: `👤 ${displayName} ✅`, callback_data: `sc:${user.uid}` }
+          : { text: `👤 ${displayName}`, callback_data: `sc:${user.uid}` };
+
+        await ctx.telegram.sendMessage(
+          config.telegram.groupId,
+          `🔍 Tìm thấy theo username <b>${query}</b>:
+✅ = đã có topic • Nhấn để mở nếu đã map, hoặc tạo nếu chưa có`,
+          {
+            ...replyOpts,
+            parse_mode: 'HTML',
+            reply_markup: { inline_keyboard: [[button]] },
+          },
+        );
+        return;
+      }
+    } catch { /* username search failed, continue to cache search */ }
+
     // Refresh friends cache if stale
     if (!friendsCache.isFresh()) {
       try {
