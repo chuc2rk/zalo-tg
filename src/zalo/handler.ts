@@ -1913,9 +1913,6 @@ ${escapeHtml(photoCaption)}`
       const rIcon: string = data?.content?.rIcon ?? '';
       const emoji = REACTION_EMOJI[rIcon] ?? rIcon;
 
-      // If empty reaction icon → user removed reaction; skip notification
-      if (!rIcon) return;
-
       const rMsgs: Array<{ gMsgID?: string | number; cMsgID?: string | number }> = data?.content?.rMsg ?? [];
       const targetMsgIds = Array.from(new Set([
         String(rMsgs[0]?.gMsgID ?? ''),
@@ -1942,7 +1939,7 @@ ${escapeHtml(photoCaption)}`
         return;
       }
 
-      if (reaction?.isSelf && targetMsgIds.some(msgId => reactionEchoStore.consume(zaloId, msgId, rIcon))) {
+      if (rIcon && reaction?.isSelf && targetMsgIds.some(msgId => reactionEchoStore.consume(zaloId, msgId, rIcon))) {
         console.log(`[ZaloHandler] Reaction: skip bridge echo for ${zaloId}/${targetMsgIds.join('|')}/${rIcon}`);
         return;
       }

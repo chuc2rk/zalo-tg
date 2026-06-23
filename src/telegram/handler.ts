@@ -16,8 +16,8 @@ function normalizeSenderOnlyCaption(text: string): string {
     .replace(/&gt;/gi, '>')
     .replace(/^@chuc2rk\s*/i, '')
     .replace(/^👤\s*/, '')
-    .replace(/^[🔵🟢🟣🟠🔴🟡⚫⚪🟤🔷🔶🔹🔸🟦🟩🟪🟧🟥🟨⬛⬜]\s+/u, '')
-    .replace(/^[A-Z0-9?]{2}\s+/u, '')
+    .replace(/^[🔵🟢🟣🟠🔴🟡⚫⚪🟤🔷🔶🔹🔸🟦🟩🟪🟧🟥🟨⬛⬜][▌●◆■▲✦✚⬢]?\s*/u, '')
+    .replace(/^━+\s*/u, '')
     .replace(/[:：]$/, '')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -53,7 +53,29 @@ function isSenderOnlyForwardCaption(caption: string | undefined, sourceTopicId: 
   return false;
 }
 
+const BRIDGE_TEXT_SEPARATOR_RE = /^[━─—\-]{4,}\s*$/u;
+
+function stripBridgeForwardedTextHeader(text: string): { text: string; stripped: boolean } {
+  const lines = text.split(/\r?\n/);
+  if (lines.length < 3) return { text, stripped: false };
+
+  // Text messages bridged from Zalo groups are rendered in Telegram as:
+  //   <sender-only header, e.g. "🟪◆ BẠN">
+  //   ━━━━━━━━
+  //   real content
+  // When that Telegram message is forwarded to another Zalo topic, resend only
+  // the real content; otherwise recipients see a bogus leading "Bạn" block.
+  const header = lines[0]?.trim();
+  const separator = lines[1]?.trim() ?? '';
+  if (header && BRIDGE_TEXT_SEPARATOR_RE.test(separator) && isSenderOnlyForwardCaption(header, undefined)) {
+    return { text: lines.slice(2).join('\n').replace(/^\s+/, ''), stripped: true };
+  }
+
+  return { text, stripped: false };
+}
+
 export const __test_isSenderOnlyForwardCaption = isSenderOnlyForwardCaption;
+export const __test_stripBridgeForwardedTextHeader = stripBridgeForwardedTextHeader;
 
 function splitLongText(text: string): string[] {
   if (text.length <= MAX_ZALO_TEXT_LENGTH) return [text];
@@ -2490,6 +2512,11 @@ export function setupTelegramHandler(
           console.log(`[TG→Zalo] getZaloQuote: wrapper tgMsgId=${tgMsgId} has empty cliMsgId; using nearby rich quote tgMsgId=${nearby.tgMsgId} msgId=${nearby.quote.msgId} cliMsgId=${nearby.quote.cliMsgId}`);
           return nearby.quote;
         }
+        const fromSentStore = sentMsgStore.getQuote(tgMsgId);
+        if (fromSentStore) {
+          console.log(`[TG→Zalo] getZaloQuote: msgStore placeholder has no cliMsgId; fallback from sentMsgStore for tgMsgId=${tgMsgId} msgId=${fromSentStore.msgId} cliMsgId=${fromSentStore.cliMsgId}`);
+          return fromSentStore;
+        }
         console.log(`[TG→Zalo] getZaloQuote: found in msgStore but cliMsgId not yet confirmed (${fromMsgStore.cliMsgId}) — skipping quote for tgMsgId=${tgMsgId}`);
         return undefined;
       }
@@ -2594,22 +2621,28 @@ export function setupTelegramHandler(
       if ('text' in msg && msg.text) {
         // Skip bot commands that were already handled above
         if (msg.text.startsWith('/')) return;
-        console.log(`[TG→Zalo] sendMessage → zaloId=${zaloId} type=${threadType} text="${msg.text.slice(0, 80)}"`);
+        const strippedForward = stripBridgeForwardedTextHeader(msg.text);
+        const outgoingText = strippedForward.text;
+        if (!outgoingText.trim()) return;
+        if (strippedForward.stripped) {
+          console.log(`[TG→Zalo] Strip bridge forwarded text header for tgMsgId=${msg.message_id}`);
+        }
+        console.log(`[TG→Zalo] sendMessage → zaloId=${zaloId} type=${threadType} text="${outgoingText.slice(0, 80)}"`);
         // Look up Zalo quote data if this TG message is a reply.
         // Tries msgStore (Zalo→TG) first, then sentMsgStore (TG→Zalo).
         const replyToMsgId = msg.reply_to_message?.message_id;
         const zaloQuote = getZaloQuote(replyToMsgId);
 
         const _rawTextMentions = resolveTgMentions(
-          msg.text,
-          ('entities' in msg ? msg.entities : undefined) as ReadonlyArray<TgEntity> | undefined,
+          outgoingText,
+          strippedForward.stripped ? undefined : ('entities' in msg ? msg.entities : undefined) as ReadonlyArray<TgEntity> | undefined,
           threadType === ThreadType.Group,
           threadType === ThreadType.Group ? zaloId : undefined,
         );
 
         // Auto-prepend @Name when replying to someone else's message in a group
         const _textAutoMention = buildReplyAutoMention(replyToMsgId, threadType);
-        const finalText = _textAutoMention ? _textAutoMention.prefix + msg.text : msg.text;
+        const finalText = _textAutoMention ? _textAutoMention.prefix + outgoingText : outgoingText;
         const zaloMentions = _textAutoMention
           ? [
               _textAutoMention.mention,
@@ -2620,7 +2653,7 @@ export function setupTelegramHandler(
         sentMsgStore.markSending(zaloId);
         try {
           const chunks = splitLongText(finalText);
-          let firstResult: Awaited<ReturnType<typeof api.sendMessage>> | undefined;
+          const sentZaloMsgIds: (string | number)[] = [];
           for (let ci = 0; ci < chunks.length; ci++) {
             const chunkText = chunks[ci]!;
             // Adjust mentions for this chunk's offset
@@ -2655,22 +2688,24 @@ export function setupTelegramHandler(
               }
               throw err;
             });
-            if (ci === 0) firstResult = sendResult;
+            const typedSendResult = sendResult as { message?: { msgId?: string | number } } | undefined;
+            const chunkZaloMsgId = typedSendResult?.message?.msgId;
+            if (chunkZaloMsgId !== undefined) sentZaloMsgIds.push(chunkZaloMsgId);
             // Space out chunks to avoid Zalo rate limiting
             if (ci < chunks.length - 1) await new Promise(r => setTimeout(r, 500));
           }
-          const zaloMsgId = firstResult?.message?.msgId;
+          const zaloMsgId = sentZaloMsgIds[0];
           if (zaloMsgId !== undefined) {
-            sentMsgStore.save(msg.message_id, { msgIds: [zaloMsgId], zaloId, threadType });
+            sentMsgStore.save(msg.message_id, { msgIds: sentZaloMsgIds, zaloId, threadType });
             const ownUid = String(api.getOwnId?.() ?? '');
-            console.log(`[TG→Zalo] msgStore.save for tgMsgId=${msg.message_id} msgId=${zaloMsgId} ownUid=${ownUid}`);
-            msgStore.save(msg.message_id, [String(zaloMsgId)], {
+            console.log(`[TG→Zalo] msgStore.save for tgMsgId=${msg.message_id} msgIds=[${sentZaloMsgIds.join(',')}] ownUid=${ownUid}`);
+            msgStore.save(msg.message_id, sentZaloMsgIds.map(String), {
               msgId: String(zaloMsgId),
               cliMsgId: '',
               uidFrom: ownUid,
               ts: String(Math.floor(Date.now() / 1000)),
               msgType: 'webchat',
-            content: (msg as any).text ?? '',
+              content: outgoingText,
               ttl: 0,
               zaloId,
               threadType: entry.type,

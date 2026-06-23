@@ -5,7 +5,7 @@ import os from 'os';
 import { pathToFileURL } from 'url';
 import { downloadToTemp, cleanTemp } from '../../src/utils/media.js';
 import { aliasCache } from '../../src/store.js';
-import { __test_isSenderOnlyForwardCaption } from '../../src/telegram/handler.js';
+import { __test_isSenderOnlyForwardCaption, __test_stripBridgeForwardedTextHeader } from '../../src/telegram/handler.js';
 
 const testRoot = path.join(os.tmpdir(), `zalo-tg-media-test-${process.pid}`);
 const dataDir = path.join(testRoot, 'bot-api-data');
@@ -52,6 +52,18 @@ describe('forwarded bridge media captions', () => {
     aliasCache.setAll([{ userId: 'u1', alias: 'Lê Mạnh Hùng' }]);
     expect(__test_isSenderOnlyForwardCaption('Lê Mạnh Hùng', undefined)).toBe(true);
     expect(__test_isSenderOnlyForwardCaption('🔵 Lê Mạnh Hùng:', undefined)).toBe(true);
+    expect(__test_isSenderOnlyForwardCaption('🟪◆ Lê Mạnh Hùng:', undefined)).toBe(true);
+    expect(__test_isSenderOnlyForwardCaption('━━━━━━━━\nLê Mạnh Hùng:', undefined)).toBe(true);
     expect(__test_isSenderOnlyForwardCaption('Báo giá rãnh loại 7,8', undefined)).toBe(false);
+  });
+
+  it('strips bridge sender header when forwarding text messages', () => {
+    const stripped = __test_stripBridgeForwardedTextHeader('🟪◆ BẠN\n━━━━━━━━\nNội dung cần gửi');
+    expect(stripped).toEqual({ text: 'Nội dung cần gửi', stripped: true });
+  });
+
+  it('keeps normal multi-line text intact', () => {
+    const kept = __test_stripBridgeForwardedTextHeader('Bạn ơi\n━━━━━━━━\nkhông phải header bridge');
+    expect(kept).toEqual({ text: 'Bạn ơi\n━━━━━━━━\nkhông phải header bridge', stripped: false });
   });
 });

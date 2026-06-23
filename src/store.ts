@@ -967,7 +967,7 @@ const _sentKeyOrder: number[] = [];
 const SENT_MAP_MAX = 5000;
 
 /** zaloId values currently being sent by the bot (to handle echo race condition) */
-const _pendingSendConvos = new Map<string, number>(); // zaloId → timestamp
+const _pendingSendConvos = new Map<string, { since: number; count: number }>(); // zaloId → active sends
 
 export const sentMsgStore = {
   /** Record a message we sent from TG→Zalo. tgMsgId is the user's TG message. */
@@ -1053,12 +1053,23 @@ export const sentMsgStore = {
    * back the message before the HTTP response (and sentMsgStore.save) arrives.
    */
   markSending(zaloId: string): void {
-    _pendingSendConvos.set(zaloId, Date.now());
+    const now = Date.now();
+    const prev = _pendingSendConvos.get(zaloId);
+    _pendingSendConvos.set(zaloId, {
+      since: prev?.since ?? now,
+      count: (prev?.count ?? 0) + 1,
+    });
   },
 
   /** Call AFTER sentMsgStore.save() or on send error. */
   unmarkSending(zaloId: string): void {
-    _pendingSendConvos.delete(zaloId);
+    const prev = _pendingSendConvos.get(zaloId);
+    if (!prev) return;
+    if (prev.count > 1) {
+      _pendingSendConvos.set(zaloId, { since: prev.since, count: prev.count - 1 });
+    } else {
+      _pendingSendConvos.delete(zaloId);
+    }
   },
 
   /**
@@ -1070,12 +1081,17 @@ export const sentMsgStore = {
    * of genuine messages arriving from other devices.
    */
   isSendingTo(zaloId: string): boolean {
-    const ts = _pendingSendConvos.get(zaloId);
-    return ts !== undefined && Date.now() - ts < 5_000;
+    const pending = _pendingSendConvos.get(zaloId);
+    return pending !== undefined && pending.count > 0 && Date.now() - pending.since < 5_000;
   },
 
   stats(): { entries: number } {
     return { entries: _sentMap.size };
+  },
+
+  /** Test-only hook for regression coverage of concurrent send suppression. */
+  _testPendingCount(zaloId: string): number {
+    return _pendingSendConvos.get(zaloId)?.count ?? 0;
   },
 };
 
