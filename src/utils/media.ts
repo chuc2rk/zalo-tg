@@ -1,8 +1,10 @@
 import axios from 'axios';
 import { createWriteStream, mkdirSync, copyFileSync, existsSync } from 'fs';
 import { stat, unlink } from 'fs/promises';
+import { readFile, writeFile } from 'fs/promises';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
+import { gunzipSync } from 'zlib';
 import path from 'path';
 import os from 'os';
 
@@ -173,6 +175,64 @@ export async function convertWebmToGif(inputPath: string): Promise<string> {
   });
   await unlink(palettePass).catch(() => undefined);
   return outputPath;
+}
+
+/** Convert a Telegram static WebP sticker to a lossless transparent PNG. */
+export async function convertStickerToPng(inputPath: string): Promise<string> {
+  mkdirSync(TMP_DIR, { recursive: true });
+  const { createCanvas, loadImage } = await import('@napi-rs/canvas');
+  const image = await loadImage(inputPath);
+  if (!image.width || !image.height) throw new Error('Cannot read static sticker dimensions');
+  const canvas = createCanvas(image.width, image.height);
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, image.width, image.height);
+  ctx.drawImage(image, 0, 0, image.width, image.height);
+  const outputPath = path.join(TMP_DIR, `telegram_sticker_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.png`);
+  await writeFile(outputPath, canvas.toBuffer('image/png'));
+  return outputPath;
+}
+
+/** Render Telegram's gzip-compressed Lottie/TGS sticker to a transparent GIF. */
+export async function convertTgsToGif(inputPath: string): Promise<string> {
+  mkdirSync(TMP_DIR, { recursive: true });
+  const compressed = await readFile(inputPath);
+  let animationData: Buffer;
+  try {
+    animationData = gunzipSync(compressed);
+  } catch {
+    animationData = compressed;
+  }
+
+  const { createCanvas, GifDisposal, GifEncoder, LottieAnimation } = await import('@napi-rs/canvas');
+  const animation = LottieAnimation.loadFromData(animationData);
+  const width = Math.round(animation.width);
+  const height = Math.round(animation.height);
+  const frameCount = Math.max(1, Math.round(animation.frames));
+  const fps = Number.isFinite(animation.fps) && animation.fps > 0 ? animation.fps : 30;
+  if (width < 1 || height < 1) throw new Error('TGS animation has invalid dimensions');
+  if (frameCount > 600) throw new Error(`TGS animation has too many frames: ${frameCount}`);
+
+  const canvas = createCanvas(width, height);
+  const ctx = canvas.getContext('2d');
+  const encoder = new GifEncoder(width, height, { repeat: 0, quality: 5 });
+  const delay = Math.max(20, Math.round(1_000 / fps));
+  try {
+    for (let frame = 0; frame < frameCount; frame++) {
+      ctx.clearRect(0, 0, width, height);
+      animation.seekFrame(frame);
+      animation.render(ctx);
+      const rgba = ctx.getImageData(0, 0, width, height).data;
+      encoder.addFrame(new Uint8Array(rgba.buffer, rgba.byteOffset, rgba.byteLength), width, height, {
+        delay,
+        disposal: GifDisposal.Background,
+      });
+    }
+    const outputPath = path.join(TMP_DIR, `telegram_sticker_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.gif`);
+    await writeFile(outputPath, encoder.finish());
+    return outputPath;
+  } finally {
+    encoder.dispose();
+  }
 }
 
 /**

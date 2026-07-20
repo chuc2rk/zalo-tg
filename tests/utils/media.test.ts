@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, rmSync, writeFileSync, existsSync } from 'fs';
+import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'fs';
+import { gzipSync } from 'zlib';
 import path from 'path';
 import os from 'os';
 import { pathToFileURL } from 'url';
-import { downloadToTemp, cleanTemp } from '../../src/utils/media.js';
+import { convertTgsToGif, downloadToTemp, cleanTemp } from '../../src/utils/media.js';
 import { aliasCache } from '../../src/store.js';
 import {
   __test_getExplicitReplyTarget,
@@ -85,5 +86,36 @@ describe('forwarded bridge media captions', () => {
     expect(__test_getExplicitReplyTarget({
       reply_to_message: { message_id: 6999, is_topic_message: true },
     }, 7000)).toBe(6999);
+  });
+});
+
+describe('Telegram sticker rendering', () => {
+  it('renders TGS/Lottie frames into a GIF', async () => {
+    mkdirSync(testRoot, { recursive: true });
+    const tgsPath = path.join(testRoot, 'sticker.tgs');
+    const lottie = {
+      v: '5.7.4', fr: 10, ip: 0, op: 2, w: 32, h: 32, nm: 'test', ddd: 0, assets: [],
+      layers: [{
+        ddd: 0, ind: 1, ty: 4, nm: 'dot', sr: 1,
+        ks: {
+          o: { a: 0, k: 100 }, r: { a: 0, k: 0 }, p: { a: 0, k: [16, 16, 0] },
+          a: { a: 0, k: [0, 0, 0] }, s: { a: 0, k: [100, 100, 100] },
+        },
+        shapes: [{
+          ty: 'gr', nm: 'ellipse',
+          it: [
+            { d: 1, ty: 'el', s: { a: 0, k: [20, 20] }, p: { a: 0, k: [0, 0] } },
+            { ty: 'fl', c: { a: 0, k: [1, 0, 0, 1] }, o: { a: 0, k: 100 }, r: 1 },
+            { ty: 'tr', p: { a: 0, k: [0, 0] }, a: { a: 0, k: [0, 0] }, s: { a: 0, k: [100, 100] }, r: { a: 0, k: 0 }, o: { a: 0, k: 100 }, sk: { a: 0, k: 0 }, sa: { a: 0, k: 0 } },
+          ],
+        }],
+        ip: 0, op: 2, st: 0, bm: 0,
+      }],
+    };
+    writeFileSync(tgsPath, gzipSync(JSON.stringify(lottie)));
+    const gifPath = await convertTgsToGif(tgsPath);
+    expect(readFileSync(gifPath).subarray(0, 6).toString('ascii')).toBe('GIF89a');
+    await cleanTemp(gifPath);
+    rmSync(testRoot, { recursive: true, force: true });
   });
 });

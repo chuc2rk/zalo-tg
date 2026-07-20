@@ -147,10 +147,11 @@ import { store, msgStore, userCache, friendsCache, groupsCache, sentMsgStore, po
 import { getAutoReplyState, setAutoReplyEnabled, AUTO_REPLY_COOLDOWN_MIN, AUTO_REPLY_MAX_PER_HOUR } from '../zalo/autoReply.js';
 import { tgBot } from './bot.js';
 import { config } from '../config.js';
-import { downloadToTemp, cleanTemp, convertToM4a, extractVideoThumbnail, convertWebmToGif } from '../utils/media.js';
+import { downloadToTemp, cleanTemp, convertStickerToPng, convertTgsToGif, convertToM4a, extractVideoThumbnail, convertWebmToGif } from '../utils/media.js';
 import { triggerQRLogin } from '../zalo/client.js';
 import { triggerAppLogin } from '../zalo/loginApp.js';
 import { invalidateAppSession, appGetReceivedFriendRequests, appGetSentFriendRequests, appGetGroupInfo, appGetGroupMembersInfo, appGetFriendProfilesV2, appRequestVoiceCall, appRequestGroupVoiceCall, type AppUserProfile } from '../zalo/appApi.js';
+import { resetMemberCacheLoaded } from '../zalo/handler.js';
 import { escapeHtml } from '../utils/format.js';
 import { triggerUpdateCheck } from '../updater.js';
 
@@ -467,6 +468,7 @@ export function setupTelegramHandler(
     const threadId = isFromGroup ? ctx.message.message_thread_id : undefined;
     await handleLoginCommand(ctx.chat.id, threadId, (newApi) => {
       currentApi = newApi;
+      resetMemberCacheLoaded();
       void onZaloLogin(newApi).catch((e: unknown) => console.error('[/login] onZaloLogin error:', e));
     });
   });
@@ -479,6 +481,7 @@ export function setupTelegramHandler(
     const threadId = isFromGroup ? ctx.message.message_thread_id : undefined;
     await handleLoginCommand(ctx.chat.id, threadId, (newApi) => {
       currentApi = newApi;
+      resetMemberCacheLoaded();
       void onZaloLogin(newApi).catch((e: unknown) => console.error('[/loginweb] onZaloLogin error:', e));
     });
   });
@@ -530,6 +533,7 @@ export function setupTelegramHandler(
       });
 
       invalidateAppSession();
+      resetMemberCacheLoaded();
       currentApi = newApi;
       void onZaloLogin(newApi).catch((e: unknown) => console.error('[/loginapp] onZaloLogin error:', e));
     } catch (err) {
@@ -1145,6 +1149,9 @@ export function setupTelegramHandler(
         `Thành viên: <b>${totalMember ?? '?'}</b>`,
         `Đọc được tên: <b>${resolvedCount}/${memberUids.length}</b>`,
       ];
+      if (groupData.totalMember && memberUids.length < groupData.totalMember) {
+        headerLines.push('', `⚠️ Nhóm đang ẩn danh sách thành viên. API hiện đọc được ${memberUids.length}/${groupData.totalMember}; dùng <b>/loginapp</b> rồi thử lại.`);
+      }
       if (showDetail) headerLines.push(`Mode: <b>detail</b> — có UID/source để phân biệt trùng tên`);
       if (!showAll && members.length > displayLimit) {
         headerLines.push(``, `ℹ️ Đang hiện ${displayLimit}/${members.length} người. Gõ <code>/group_info all</code> để xem hết.`);
@@ -3552,6 +3559,33 @@ export function setupTelegramHandler(
       if ('sticker' in msg && msg.sticker) {
         const sticker = msg.sticker;
         runAttachmentInBackground(`sticker_${Date.now()}`, async () => {
+          const sendRenderedSticker = async (localPath: string): Promise<void> => {
+            sentMsgStore.markSending(zaloId);
+            try {
+              const sendResult = await withZaloTimeout(
+                () => api.sendMessage({ msg: '', attachments: [localPath] }, zaloId, threadType),
+                'sendSticker(rendered)',
+              ) as { message?: { msgId?: number } | null; attachment?: Array<{ msgId?: number }> };
+              const zaloMsgId = sendResult?.message?.msgId ?? sendResult?.attachment?.[0]?.msgId;
+              if (zaloMsgId === undefined) throw new Error('Zalo returned no msgId for rendered sticker');
+              sentMsgStore.save(msg.message_id, { msgIds: [zaloMsgId], zaloId, threadType });
+              const ownUid = String(api.getOwnId?.() ?? '');
+              msgStore.save(msg.message_id, [String(zaloMsgId)], {
+                msgId: String(zaloMsgId),
+                cliMsgId: '',
+                uidFrom: ownUid,
+                ts: String(Math.floor(Date.now() / 1000)),
+                msgType: 'webchat',
+                content: '[Sticker]',
+                ttl: 0,
+                zaloId,
+                threadType: entry.type,
+              });
+            } finally {
+              sentMsgStore.unmarkSending(zaloId);
+            }
+          };
+
           if (sticker.is_video) {
             // Video sticker (.webm) → convert to GIF so Zalo shows an animation
             let webmPath: string | null = null;
@@ -3560,31 +3594,7 @@ export function setupTelegramHandler(
               const fileLink = await ctx.telegram.getFileLink(sticker.file_id);
               webmPath = await downloadToTemp(fileLink.toString(), `sticker_${Date.now()}.webm`);
               gifPath  = await convertWebmToGif(webmPath);
-              sentMsgStore.markSending(zaloId);
-              try {
-                const sendResult = await withZaloTimeout(
-                  () => api.sendMessage({ msg: '', attachments: [gifPath!] }, zaloId, threadType),
-                  'sendSticker(video)',
-                ) as { message?: { msgId?: number } | null; attachment?: Array<{ msgId?: number }> };
-                const zaloMsgId = sendResult?.message?.msgId ?? sendResult?.attachment?.[0]?.msgId;
-                if (zaloMsgId !== undefined) {
-                  sentMsgStore.save(msg.message_id, { msgIds: [zaloMsgId], zaloId, threadType });
-                  const ownUid = String(api.getOwnId?.() ?? '');
-                  msgStore.save(msg.message_id, [String(zaloMsgId)], {
-                    msgId: String(zaloMsgId),
-                    cliMsgId: '',
-                    uidFrom: ownUid,
-                    ts: String(Math.floor(Date.now() / 1000)),
-                    msgType: 'webchat',
-                    content: '[Sticker]',
-                    ttl: 0,
-                    zaloId,
-                    threadType: entry.type,
-                  });
-                }
-              } finally {
-                sentMsgStore.unmarkSending(zaloId);
-              }
+              await sendRenderedSticker(gifPath);
             } catch (err) {
               console.error('[TG→Zalo] sticker webm→gif failed, falling back to thumbnail:', err);
               // Fallback: send jpg thumbnail
@@ -3594,13 +3604,39 @@ export function setupTelegramHandler(
               if (webmPath) await cleanTemp(webmPath);
               if (gifPath)  await cleanTemp(gifPath);
             }
+          } else if (sticker.is_animated) {
+            let tgsPath: string | null = null;
+            let gifPath: string | null = null;
+            try {
+              const fileLink = await ctx.telegram.getFileLink(sticker.file_id);
+              tgsPath = await downloadToTemp(fileLink.toString(), `sticker_${Date.now()}.tgs`);
+              gifPath = await convertTgsToGif(tgsPath);
+              await sendRenderedSticker(gifPath);
+              console.log(`[TG→Zalo] TGS sticker rendered as GIF: msgId=${msg.message_id}`);
+            } catch (err) {
+              console.error('[TG→Zalo] sticker tgs→gif failed, falling back to thumbnail:', err);
+              const thumbId = sticker.thumbnail?.file_id;
+              if (thumbId) await sendAttachment(thumbId, `sticker_${Date.now()}.png`);
+            } finally {
+              if (tgsPath) await cleanTemp(tgsPath);
+              if (gifPath) await cleanTemp(gifPath);
+            }
           } else {
-            // Animated sticker (.tgs/Lottie) → no lightweight converter, use jpg thumbnail
-            // Static sticker (.webp) → send as-is
-            const useThumb = sticker.is_animated && sticker.thumbnail;
-            const fileId   = useThumb ? sticker.thumbnail!.file_id : sticker.file_id;
-            const ext      = useThumb ? '.jpg' : '.webp';
-            await sendAttachment(fileId, `sticker_${Date.now()}${ext}`);
+            let webpPath: string | null = null;
+            let pngPath: string | null = null;
+            try {
+              const fileLink = await ctx.telegram.getFileLink(sticker.file_id);
+              webpPath = await downloadToTemp(fileLink.toString(), `sticker_${Date.now()}.webp`);
+              pngPath = await convertStickerToPng(webpPath);
+              await sendRenderedSticker(pngPath);
+              console.log(`[TG→Zalo] Static sticker rendered as PNG: msgId=${msg.message_id}`);
+            } catch (err) {
+              console.error('[TG→Zalo] sticker webp→png failed, sending original:', err);
+              await sendAttachment(sticker.file_id, `sticker_${Date.now()}.webp`);
+            } finally {
+              if (webpPath) await cleanTemp(webpPath);
+              if (pngPath) await cleanTemp(pngPath);
+            }
           }
         });
         return;
