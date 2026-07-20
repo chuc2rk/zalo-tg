@@ -3027,6 +3027,7 @@ export function setupTelegramHandler(
         fileSize?: number,
         caption?: string,
         captionMentions?: Array<{ pos: number; uid: string; len: number }>,
+        convertTelegramAnimation = false,
       ) => {
         if (fileSize !== undefined && fileSize > TG_FILE_LIMIT) {
           await notifyTooBig(filename, fileSize);
@@ -3063,7 +3064,18 @@ export function setupTelegramHandler(
             throw err;
           }
         }
-        const localPath = await downloadToTemp(fileLink.toString(), filename);
+        let localPath = await downloadToTemp(fileLink.toString(), filename);
+        if (convertTelegramAnimation && path.extname(filename).toLowerCase() === '.mp4') {
+          try {
+            const sourcePath = localPath;
+            localPath = await convertWebmToGif(sourcePath);
+            await cleanTemp(sourcePath);
+            filename = filename.replace(/(?:\.gif)?\.mp4$/i, '.gif');
+            console.log(`[TG→Zalo] Converted Telegram MP4 animation to real GIF: ${filename}`);
+          } catch (animationErr) {
+            console.warn('[TG→Zalo] MP4 animation→GIF failed; sending original MP4:', animationErr);
+          }
+        }
         sentMsgStore.markSending(zaloId);
         try {
           console.log(`[TG→Zalo] Sending ${filename} → zaloId=${zaloId} type=${threadType}`);
@@ -3361,7 +3373,7 @@ export function setupTelegramHandler(
         const fname = msg.animation.file_name ?? 'animation.gif';
         const { cap, capMentions } = getCaptionMentions();
         runAttachmentInBackground(`${fname} (${msg.animation.file_size ?? 0} bytes)`, () =>
-          sendAttachment(msg.animation.file_id, fname, msg.animation.file_size, cap, capMentions),
+          sendAttachment(msg.animation.file_id, fname, msg.animation.file_size, cap, capMentions, true),
         );
         return;
       }
