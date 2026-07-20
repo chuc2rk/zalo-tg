@@ -10,7 +10,7 @@ import { ZALO_MSG_TYPES } from './types.js';
 import { store } from '../store.js';
 import { tgBot } from '../telegram/bot.js';
 import { config } from '../config.js';
-import { downloadToTemp, cleanTemp } from '../utils/media.js';
+import { downloadToTemp, cleanTemp, convertSpriteSheetToGif } from '../utils/media.js';
 import { applyZaloMarkupHtml, formatGroupMsgHtml, formatGroupMsg, groupCaption, topicName, truncate, escapeHtml } from '../utils/format.js';
 import type { ZaloStyle } from '../utils/format.js';
 import { msgStore, userCache, pollStore, sentMsgStore, zaloAlbumStore, reactionEchoStore, reactionEventDedupeStore, aliasCache, friendsCache, nameCache, recentlyRecalledMsgIds, markRecallConfirmed, type ZaloQuoteData } from '../store.js';
@@ -1360,17 +1360,61 @@ ${escapeHtml(photoCaption)}`
 
       // ── 7. Sticker – fetch real URL via getStickersDetail ──────────────────
       if (msgType === ZALO_MSG_TYPES.STICKER) {
-        const stickerId = media.id;
-        if (!stickerId) {
+        const stickerId = Number(media.id);
+        if (!Number.isFinite(stickerId) || stickerId <= 0) {
           console.warn('[ZaloHandler] Sticker: no id in content:', media);
           return;
         }
         try {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const details: any[] = await api.getStickersDetail([stickerId]);
+          const details = await api.getStickersDetail(stickerId) as Array<{
+            stickerWebpUrl?: string | null;
+            stickerUrl?: string;
+            stickerSpriteUrl?: string;
+            totalFrames?: number;
+            duration?: number;
+          }>;
           const detail = details?.[0];
-          // Animated stickers only have stickerSpriteUrl (sprite sheet) — no static webp/url
-          const isAnimated = !detail?.stickerWebpUrl && !detail?.stickerUrl && !!detail?.stickerSpriteUrl;
+          if (!detail) {
+            console.warn(`[ZaloHandler] Sticker #${stickerId}: detail API returned no data`);
+            return;
+          }
+
+          const totalFrames = Number(detail.totalFrames ?? 0);
+          const isAnimated = Boolean(detail.stickerSpriteUrl && totalFrames > 1);
+          if (isAnimated) {
+            let spritePath: string | undefined;
+            let gifPath: string | undefined;
+            try {
+              spritePath = await downloadToTemp(
+                detail.stickerSpriteUrl!,
+                `sticker_sprite_${Date.now()}.png`,
+              );
+              gifPath = await convertSpriteSheetToGif(
+                spritePath,
+                totalFrames,
+                Number(detail.duration ?? 100),
+              );
+              const stream = createReadStream(gifPath);
+              const sent = await tg.sendAnimation(
+                config.telegram.groupId,
+                { source: stream, filename: `zalo_sticker_${stickerId}.gif` },
+                {
+                  ...tgBase,
+                  caption: `${senderCaption} <i>(sticker động)</i>`,
+                  parse_mode: 'HTML',
+                },
+              );
+              saveTgMapping(sent);
+              console.log(`[Zalo→TG] Animated sticker sent: stickerId=${stickerId} frames=${totalFrames} msgId=${sent.message_id}`);
+              return;
+            } catch (animatedErr) {
+              console.warn(`[ZaloHandler] Animated sticker #${stickerId} conversion/upload failed; using static fallback:`, animatedErr);
+            } finally {
+              if (gifPath) await cleanTemp(gifPath);
+              if (spritePath) await cleanTemp(spritePath);
+            }
+          }
+
           const url: string | undefined =
             detail?.stickerWebpUrl ?? detail?.stickerUrl ?? detail?.stickerSpriteUrl;
           if (!url) {
@@ -1381,29 +1425,19 @@ ${escapeHtml(photoCaption)}`
           const localPath = await downloadToTemp(url, `sticker_${Date.now()}${ext}`);
           try {
             let sent: { message_id: number };
-            if (isAnimated) {
-              // Animated stickers are sprite sheets — send as photo with label
-              const animCaption = `${senderCaption} <i>(sticker động 🎥)</i>`;
+            try {
+              // Try native TG sticker (webp ≤512 KB displays as a proper sticker)
               const stream = createReadStream(localPath);
-              sent = await tg.sendPhoto(config.telegram.groupId, { source: stream }, {
-                ...tgBase,
-                caption: animCaption,
-                parse_mode: 'HTML',
-              });
-            } else {
-              try {
-                // Try native TG sticker (webp ≤512 KB displays as a proper sticker)
-                const stream = createReadStream(localPath);
-                sent = await tg.sendSticker(
-                  config.telegram.groupId,
-                  { source: stream },
-                  tgBase as Parameters<typeof tg.sendSticker>[2],
-                );
-              } catch {
-                // Fall back to photo if file is too large or format unsupported
-                const stream = createReadStream(localPath);
-                sent = await tg.sendPhoto(config.telegram.groupId, { source: stream }, tgOpts);
-              }
+              sent = await tg.sendSticker(
+                config.telegram.groupId,
+                { source: stream },
+                tgBase as Parameters<typeof tg.sendSticker>[2],
+              );
+            } catch {
+              // Animated conversion or native sticker may be rejected; always
+              // preserve a visible static fallback instead of dropping media.
+              const stream = createReadStream(localPath);
+              sent = await tg.sendPhoto(config.telegram.groupId, { source: stream }, tgOpts);
             }
             saveTgMapping(sent);
           } finally { await cleanTemp(localPath); }

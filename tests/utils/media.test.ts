@@ -4,7 +4,7 @@ import { gzipSync } from 'zlib';
 import path from 'path';
 import os from 'os';
 import { pathToFileURL } from 'url';
-import { convertTgsToGif, downloadToTemp, cleanTemp } from '../../src/utils/media.js';
+import { convertTgsToGif, convertSpriteSheetToGif, getSpriteSheetLayout, downloadToTemp, cleanTemp } from '../../src/utils/media.js';
 import { aliasCache } from '../../src/store.js';
 import {
   __test_getExplicitReplyTarget,
@@ -114,6 +114,35 @@ describe('Telegram sticker rendering', () => {
     };
     writeFileSync(tgsPath, gzipSync(JSON.stringify(lottie)));
     const gifPath = await convertTgsToGif(tgsPath);
+    expect(readFileSync(gifPath).subarray(0, 6).toString('ascii')).toBe('GIF89a');
+    await cleanTemp(gifPath);
+    rmSync(testRoot, { recursive: true, force: true });
+  });
+});
+
+describe('Zalo animated sticker rendering', () => {
+  it('resolves horizontal and vertical sprite strips', () => {
+    expect(getSpriteSheetLayout(96, 32, 3)).toEqual({
+      frames: 3, frameWidth: 32, frameHeight: 32, direction: 'horizontal',
+    });
+    expect(getSpriteSheetLayout(32, 96, 3)).toEqual({
+      frames: 3, frameWidth: 32, frameHeight: 32, direction: 'vertical',
+    });
+  });
+
+  it('converts a sprite sheet into an animated GIF', async () => {
+    mkdirSync(testRoot, { recursive: true });
+    const spritePath = path.join(testRoot, 'zalo-sprite.png');
+    const { createCanvas } = await import('@napi-rs/canvas');
+    const canvas = createCanvas(96, 32);
+    const ctx = canvas.getContext('2d');
+    for (const [index, color] of ['#ff0000', '#00ff00', '#0000ff'].entries()) {
+      ctx.fillStyle = color;
+      ctx.fillRect(index * 32, 0, 32, 32);
+    }
+    writeFileSync(spritePath, canvas.toBuffer('image/png'));
+
+    const gifPath = await convertSpriteSheetToGif(spritePath, 3, 100);
     expect(readFileSync(gifPath).subarray(0, 6).toString('ascii')).toBe('GIF89a');
     await cleanTemp(gifPath);
     rmSync(testRoot, { recursive: true, force: true });

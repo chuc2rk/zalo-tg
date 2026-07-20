@@ -17,6 +17,7 @@ Before adding a feature, applying upstream changes, or committing a fix, preserv
   - Telegram forwards never inherit the forum topic root as a Zalo quote, and sender-only forwarded media captions are stripped before any reply auto-mention is added.
   - TG media groups wait long enough for all selected photos/videos to join the same Zalo send; forwarding two photos must not silently flush only the first item.
   - Telegram video/TGS/static stickers retain animation or transparency when bridged to Zalo, with thumbnail/original fallbacks if rendering fails.
+  - Zalo animated sticker sprite sheets are converted to real Telegram GIF animations; conversion/upload failures retain a visible static fallback.
   - Telegram GIF animations arrive from Bot API as MP4 (`animation.gif.mp4`) but are transcoded to a real `.gif` before sending to Zalo.
   - Media conversion uses bundled `ffmpeg-static`, so GIF/sticker/audio/video conversion does not depend on a system-wide FFmpeg installation.
   - Zalo reactions in group topics use native Telegram reactions only; they must not create reply/quote summary messages. Unsupported icons are skipped silently.
