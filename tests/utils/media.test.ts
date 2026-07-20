@@ -5,7 +5,12 @@ import os from 'os';
 import { pathToFileURL } from 'url';
 import { downloadToTemp, cleanTemp } from '../../src/utils/media.js';
 import { aliasCache } from '../../src/store.js';
-import { __test_isSenderOnlyForwardCaption, __test_stripBridgeForwardedTextHeader } from '../../src/telegram/handler.js';
+import {
+  __test_getExplicitReplyTarget,
+  __test_isExplicitTelegramForward,
+  __test_isSenderOnlyForwardCaption,
+  __test_stripBridgeForwardedTextHeader,
+} from '../../src/telegram/handler.js';
 
 const testRoot = path.join(os.tmpdir(), `zalo-tg-media-test-${process.pid}`);
 const dataDir = path.join(testRoot, 'bot-api-data');
@@ -65,5 +70,20 @@ describe('forwarded bridge media captions', () => {
   it('keeps normal multi-line text intact', () => {
     const kept = __test_stripBridgeForwardedTextHeader('Bạn ơi\n━━━━━━━━\nkhông phải header bridge');
     expect(kept).toEqual({ text: 'Bạn ơi\n━━━━━━━━\nkhông phải header bridge', stripped: false });
+  });
+
+  it('does not turn Telegram forwards or the forum topic root into Zalo quotes', () => {
+    expect(__test_isExplicitTelegramForward({ forward_origin: { type: 'user' } })).toBe(true);
+    expect(__test_isExplicitTelegramForward({ forward_date: 1_784_553_600 })).toBe(true);
+    expect(__test_getExplicitReplyTarget({
+      forward_origin: { type: 'user' },
+      reply_to_message: { message_id: 9001 },
+    }, 7000)).toBeUndefined();
+    expect(__test_getExplicitReplyTarget({
+      reply_to_message: { message_id: 7000, is_topic_message: true },
+    }, 7000)).toBeUndefined();
+    expect(__test_getExplicitReplyTarget({
+      reply_to_message: { message_id: 6999, is_topic_message: true },
+    }, 7000)).toBe(6999);
   });
 });

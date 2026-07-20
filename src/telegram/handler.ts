@@ -55,6 +55,38 @@ function isSenderOnlyForwardCaption(caption: string | undefined, sourceTopicId: 
 
 const BRIDGE_TEXT_SEPARATOR_RE = /^[━─—\-]{4,}\s*$/u;
 
+type TelegramForwardShape = {
+  forward_origin?: unknown;
+  forward_date?: number;
+  reply_to_message?: { message_id?: number; message_thread_id?: number; is_topic_message?: boolean };
+};
+
+function asTelegramForwardShape(msg: unknown): TelegramForwardShape {
+  return (typeof msg === 'object' && msg !== null ? msg : {}) as TelegramForwardShape;
+}
+
+function isExplicitTelegramForward(msg: unknown): boolean {
+  const shape = asTelegramForwardShape(msg);
+  return shape.forward_origin !== undefined || shape.forward_date !== undefined;
+}
+
+function getExplicitReplyTarget(
+  msg: unknown,
+  currentTopicId: number,
+): number | undefined {
+  const shape = asTelegramForwardShape(msg);
+  if (isExplicitTelegramForward(shape)) return undefined;
+  const reply = shape.reply_to_message;
+  if (!reply?.message_id) return undefined;
+
+  // Telegram forum messages may carry the topic root as reply_to_message even
+  // when the user did not press Reply. Never turn that routing metadata into a
+  // Zalo quote. A real reply inside the topic either points to another message
+  // or carries a different thread/root id.
+  if (reply.message_id === currentTopicId) return undefined;
+  return reply.message_id;
+}
+
 function stripBridgeForwardedTextHeader(text: string): { text: string; stripped: boolean } {
   const lines = text.split(/\r?\n/);
   if (lines.length < 3) return { text, stripped: false };
@@ -76,6 +108,8 @@ function stripBridgeForwardedTextHeader(text: string): { text: string; stripped:
 
 export const __test_isSenderOnlyForwardCaption = isSenderOnlyForwardCaption;
 export const __test_stripBridgeForwardedTextHeader = stripBridgeForwardedTextHeader;
+export const __test_isExplicitTelegramForward = isExplicitTelegramForward;
+export const __test_getExplicitReplyTarget = getExplicitReplyTarget;
 
 function splitLongText(text: string): string[] {
   if (text.length <= MAX_ZALO_TEXT_LENGTH) return [text];
@@ -2877,7 +2911,7 @@ export function setupTelegramHandler(
         console.log(`[TG→Zalo] sendMessage → zaloId=${zaloId} type=${threadType} text="${outgoingText.slice(0, 80)}"`);
         // Look up Zalo quote data if this TG message is a reply.
         // Tries msgStore (Zalo→TG) first, then sentMsgStore (TG→Zalo).
-        const replyToMsgId = msg.reply_to_message?.message_id;
+        const replyToMsgId = getExplicitReplyTarget(msg, topicId);
         const zaloQuote = getZaloQuote(replyToMsgId);
 
         const _rawTextMentions = resolveTgMentions(
@@ -2992,9 +3026,7 @@ export function setupTelegramHandler(
           return;
         }
         // Pass Zalo quote if the TG message is a reply to a forwarded Zalo message
-        const replyToMsgId = 'reply_to_message' in msg
-          ? (msg as { reply_to_message?: { message_id: number } }).reply_to_message?.message_id
-          : undefined;
+        const replyToMsgId = getExplicitReplyTarget(msg, topicId);
         const zaloQuote = getZaloQuote(replyToMsgId);
         let fileLink: URL;
         try {
@@ -3171,9 +3203,7 @@ export function setupTelegramHandler(
       const shouldBackgroundAttachment = (_fileSize?: number) => true;
 
       // Compute auto-mention once for this entire message (reply → prepend @Name)
-      const _captionReplyMsgId = ('reply_to_message' in msg
-        ? (msg as { reply_to_message?: { message_id: number } }).reply_to_message?.message_id
-        : undefined);
+      const _captionReplyMsgId = getExplicitReplyTarget(msg, topicId);
       const _autoMentionForMedia = buildReplyAutoMention(_captionReplyMsgId, threadType);
 
       // Helper: extract caption + resolved mentions from any media message
@@ -3182,6 +3212,13 @@ export function setupTelegramHandler(
         const capEntities = ('caption_entities' in msg
           ? (msg as { caption_entities?: ReadonlyArray<TgEntity> }).caption_entities
           : undefined);
+        const sourceTopicId = 'forward_origin' in msg
+          ? (msg as { forward_origin?: { type?: string; chat?: { id?: number }; message_thread_id?: number } }).forward_origin?.message_thread_id
+          : undefined;
+        if (isSenderOnlyForwardCaption(cap, sourceTopicId)) {
+          console.log(`[TG→Zalo] Strip sender-only forwarded media caption: "${cap}" from sourceTopicId=${sourceTopicId}`);
+          return { cap: undefined, capMentions: undefined };
+        }
         const rawMentions = cap
           ? resolveTgMentions(cap, capEntities, threadType === ThreadType.Group, threadType === ThreadType.Group ? zaloId : undefined)
           : [];
@@ -3195,13 +3232,6 @@ export function setupTelegramHandler(
             cap: cap ? _autoMentionForMedia.prefix + cap : _autoMentionForMedia.prefix.trimEnd(),
             capMentions,
           };
-        }
-        const sourceTopicId = 'forward_origin' in msg
-          ? (msg as { forward_origin?: { type?: string; chat?: { id?: number }; message_thread_id?: number } }).forward_origin?.message_thread_id
-          : undefined;
-        if (isSenderOnlyForwardCaption(cap, sourceTopicId)) {
-          console.log(`[TG→Zalo] Strip sender-only forwarded media caption: "${cap}" from sourceTopicId=${sourceTopicId}`);
-          return { cap: undefined, capMentions: undefined };
         }
         return { cap, capMentions: rawMentions.length ? rawMentions : undefined };
       };
@@ -3219,12 +3249,26 @@ export function setupTelegramHandler(
         const downloadedTgIds: number[] = [];
         try {
           for (const item of items) {
-            if ((item.fileSize ?? 0) > TG_FILE_LIMIT) continue;
+            if ((item.fileSize ?? 0) > TG_FILE_LIMIT) {
+              console.warn(`[TG→Zalo] Media group skip oversized item tgMsgId=${item.tgMsgId ?? 'unknown'} size=${item.fileSize ?? 0}`);
+              continue;
+            }
             let fileLink: URL;
-            try { fileLink = await tgBot.telegram.getFileLink(item.fileId); }
-            catch { continue; }
-            localPaths.push(await downloadToTemp(fileLink.toString(), item.fname));
-            if (item.tgMsgId !== undefined) downloadedTgIds.push(item.tgMsgId);
+            try {
+              fileLink = await tgBot.telegram.getFileLink(item.fileId);
+            } catch (err) {
+              console.warn(`[TG→Zalo] Media group could not resolve item tgMsgId=${item.tgMsgId ?? 'unknown'}:`, err);
+              continue;
+            }
+            try {
+              localPaths.push(await downloadToTemp(fileLink.toString(), item.fname));
+              if (item.tgMsgId !== undefined) downloadedTgIds.push(item.tgMsgId);
+            } catch (err) {
+              console.warn(`[TG→Zalo] Media group could not download item tgMsgId=${item.tgMsgId ?? 'unknown'}:`, err);
+            }
+          }
+          if (localPaths.length !== items.length) {
+            console.warn(`[TG→Zalo] Media group partial download: ${localPaths.length}/${items.length} items (zaloId=${meta.zaloId})`);
           }
           if (localPaths.length === 0) return;
           sentMsgStore.markSending(meta.zaloId);
@@ -3289,7 +3333,7 @@ export function setupTelegramHandler(
         const { cap, capMentions } = getCaptionMentions();
         const mediaGroupId = ('media_group_id' in msg ? (msg as { media_group_id?: string }).media_group_id : undefined);
         if (mediaGroupId) {
-          const replyToMsgId = msg.reply_to_message?.message_id;
+          const replyToMsgId = getExplicitReplyTarget(msg, topicId);
           mediaGroupStore.add(
             mediaGroupId,
             { fileId: photo.file_id, fname: 'photo.jpg', fileSize: photo.file_size, caption: cap, captionMentions: capMentions, tgMsgId: msg.message_id },
@@ -3331,7 +3375,7 @@ export function setupTelegramHandler(
         const { cap, capMentions } = getCaptionMentions();
         const mediaGroupId = ('media_group_id' in msg ? (msg as { media_group_id?: string }).media_group_id : undefined);
         if (mediaGroupId) {
-          const replyToMsgId = msg.reply_to_message?.message_id;
+          const replyToMsgId = getExplicitReplyTarget(msg, topicId);
           mediaGroupStore.add(
             mediaGroupId,
             { fileId: vid.file_id, fname, fileSize: vid.file_size, caption: cap, captionMentions: capMentions, tgMsgId: msg.message_id },
@@ -3655,9 +3699,7 @@ export function setupTelegramHandler(
       }
 
       if ('location' in msg && msg.location) {
-        const replyToMsgId = 'reply_to_message' in msg
-          ? (msg as { reply_to_message?: { message_id: number } }).reply_to_message?.message_id
-          : undefined;
+        const replyToMsgId = getExplicitReplyTarget(msg, topicId);
         const zaloQuote = getZaloQuote(replyToMsgId);
         const { latitude, longitude } = msg.location;
         const venue = ('venue' in msg && msg.venue) ? (msg.venue as { title?: string; address?: string }) : undefined;

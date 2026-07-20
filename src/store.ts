@@ -1512,7 +1512,7 @@ export const mediaGroupStore = {
       existing.timer = setTimeout(() => {
         _mgBuffers.delete(groupId);
         onFlush(existing.items, existing);
-      }, 500);
+      }, 1500);
     } else {
       const buf: MediaGroupBuffer = {
         ...meta,
@@ -1520,7 +1520,7 @@ export const mediaGroupStore = {
         timer: setTimeout(() => {
           _mgBuffers.delete(groupId);
           onFlush(buf.items, buf);
-        }, 500),
+        }, 1500),
       };
       _mgBuffers.set(groupId, buf);
     }
