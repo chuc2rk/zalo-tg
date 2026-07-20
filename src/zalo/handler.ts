@@ -13,7 +13,7 @@ import { config } from '../config.js';
 import { downloadToTemp, cleanTemp } from '../utils/media.js';
 import { applyZaloMarkupHtml, formatGroupMsgHtml, formatGroupMsg, groupCaption, topicName, truncate, escapeHtml } from '../utils/format.js';
 import type { ZaloStyle } from '../utils/format.js';
-import { msgStore, userCache, pollStore, sentMsgStore, zaloAlbumStore, reactionEchoStore, reactionSummaryStore, reactionEventDedupeStore, aliasCache, friendsCache, nameCache, recentlyRecalledMsgIds, markRecallConfirmed, type ZaloQuoteData } from '../store.js';
+import { msgStore, userCache, pollStore, sentMsgStore, zaloAlbumStore, reactionEchoStore, reactionEventDedupeStore, aliasCache, friendsCache, nameCache, recentlyRecalledMsgIds, markRecallConfirmed, type ZaloQuoteData } from '../store.js';
 import { tgQueue } from '../utils/tgQueue.js';
 import { maybeAutoReply } from './autoReply.js';
 
@@ -2024,7 +2024,6 @@ ${escapeHtml(photoCaption)}`
     try {
       const data = reaction?.data;
       const rIcon: string = data?.content?.rIcon ?? '';
-      const emoji = REACTION_EMOJI[rIcon] ?? rIcon;
 
       const rMsgs: Array<{ gMsgID?: string | number; cMsgID?: string | number }> = data?.content?.rMsg ?? [];
       const targetMsgIds = Array.from(new Set([
@@ -2071,98 +2070,35 @@ ${escapeHtml(photoCaption)}`
       const topicId = store.getTopicByZalo(zaloId, type);
       if (topicId === undefined) return;
 
-      // In 1-1 DMs, attach the reaction directly onto the Telegram message
-      // (clean, no reply) — there's only one possible reactor, so no name is
-      // needed. A bot reaction shows as the bot and Telegram can only hold one
-      // reaction per message, which is fine for a single peer but would collapse
-      // distinct reactions in a group; so groups always fall through to the
-      // named summary reply below, which can tell multiple reactors apart.
-      // The bot's own reactions don't generate message_reaction updates, so this
-      // can't echo back to Zalo. Unmappable/rejected icons also fall through.
+      // Keep reaction traffic quiet: attach the closest supported reaction
+      // directly to the Telegram message in both DMs and group topics. Telegram
+      // represents this as the bridge bot's reaction, so it cannot preserve each
+      // Zalo actor's identity/count, but it avoids creating a reply/quote message
+      // for every reacted-to message. Unsupported icons are intentionally ignored
+      // instead of generating noisy summary replies.
       const tgReaction = ZALO_TO_TG_REACTION[rIcon];
-      if (type === 0) {
-        try {
-          if (!rIcon) {
-            // Zalo sends an empty rIcon when the peer removes their reaction.
-            // Clear the native Telegram reaction too; otherwise the DM reaction
-            // would stay stuck on Telegram even after being removed on Zalo.
-            await tg.setMessageReaction(config.telegram.groupId, tgMsgId, []);
-            return;
-          }
-          if (tgReaction) {
-            await tg.setMessageReaction(
-              config.telegram.groupId,
-              tgMsgId,
-              [{ type: 'emoji', emoji: tgReaction }],
-            );
-            return; // shown natively on the message — no reply message
-          }
-        } catch (err) {
-          const m = err instanceof Error ? err.message : String(err);
-          console.warn(`[ZaloHandler] Native reaction "${tgReaction ?? rIcon}" rejected, using summary reply: ${m}`);
-          // fall through to the named summary reply
+      try {
+        if (!rIcon) {
+          // Zalo emits an empty icon for removal. Since Telegram can only show
+          // the bridge bot's aggregate/latest reaction, clear that marker.
+          await tg.setMessageReaction(config.telegram.groupId, tgMsgId, []);
+          return;
         }
+        if (tgReaction) {
+          await tg.setMessageReaction(
+            config.telegram.groupId,
+            tgMsgId,
+            [{ type: 'emoji', emoji: tgReaction }],
+          );
+          return;
+        }
+        console.log(`[ZaloHandler] Reaction: unsupported native icon ${rIcon}; skipped to avoid summary noise`);
+        return;
+      } catch (err) {
+        const m = err instanceof Error ? err.message : String(err);
+        console.warn(`[ZaloHandler] Native reaction "${tgReaction ?? rIcon}" rejected; skipped to avoid summary noise: ${m}`);
+        return;
       }
-
-      const actorName = rawName || await resolveUserDisplayName(api, actorUid || undefined, 'ai đó');
-
-      // Aggregate reactions: update the summary entry then debounce send/edit.
-      const entry = rIcon
-        ? reactionSummaryStore.upsert(tgMsgId, emoji, actorName)
-        : reactionSummaryStore.remove(tgMsgId, actorName);
-      if (!entry) return;
-
-      if (entry.debounceTimer) clearTimeout(entry.debounceTimer);
-      entry.debounceTimer = setTimeout(async () => {
-        entry.debounceTimer = null;
-        const text = reactionSummaryStore.buildText(entry, escapeHtml);
-        // Skip if text hasn't changed (same person reacting fires multiple events).
-        if (text === entry.lastSentText) return;
-        try {
-          if (entry.summaryTgMsgId === null) {
-            if (!text) return;
-            // First reaction: send a new reply message
-            const sent = await tg.sendMessage(
-              config.telegram.groupId,
-              text,
-              {
-                message_thread_id: topicId,
-                parse_mode: 'HTML',
-                reply_parameters: { message_id: tgMsgId, allow_sending_without_reply: true },
-              },
-            );
-            reactionSummaryStore.setSummaryMsgId(tgMsgId, sent.message_id);
-            reactionSummaryStore.setLastSentText(tgMsgId, text);
-          } else if (text) {
-            // Subsequent reactions: edit the existing summary message.
-            await tg.editMessageText(
-              config.telegram.groupId,
-              entry.summaryTgMsgId,
-              undefined,
-              text,
-              { parse_mode: 'HTML' },
-            );
-            reactionSummaryStore.setLastSentText(tgMsgId, text);
-          } else {
-            // Telegram cannot edit a message to empty text. Keep a small marker
-            // when the last reaction is removed.
-            const removedText = '❌';
-            await tg.editMessageText(
-              config.telegram.groupId,
-              entry.summaryTgMsgId,
-              undefined,
-              removedText,
-              { parse_mode: 'HTML' },
-            );
-            reactionSummaryStore.setLastSentText(tgMsgId, removedText);
-          }
-        } catch (editErr) {
-          const msg = editErr instanceof Error ? editErr.message : String(editErr);
-          if (!msg.includes('message is not modified')) {
-            console.warn('[ZaloHandler] Reaction summary update failed:', editErr);
-          }
-        }
-      }, 600);
     } catch (err) {
       console.error('[ZaloHandler] Reaction error:', err);
     }

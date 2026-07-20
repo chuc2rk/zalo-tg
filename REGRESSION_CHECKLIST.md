@@ -19,6 +19,7 @@ Before adding a feature, applying upstream changes, or committing a fix, preserv
   - Telegram video/TGS/static stickers retain animation or transparency when bridged to Zalo, with thumbnail/original fallbacks if rendering fails.
   - Telegram GIF animations arrive from Bot API as MP4 (`animation.gif.mp4`) but are transcoded to a real `.gif` before sending to Zalo.
   - Media conversion uses bundled `ffmpeg-static`, so GIF/sticker/audio/video conversion does not depend on a system-wide FFmpeg installation.
+  - Zalo reactions in group topics use native Telegram reactions only; they must not create reply/quote summary messages. Unsupported icons are skipped silently.
   - Hidden-member Zalo groups warn when Web API data is partial, and a fresh `/loginapp` clears the loaded-set so member names can be repopulated from PC App API.
   - TG→Zalo long text split into chunks saves all returned Zalo `msgId`s so later self-echo/reply handling does not leak the last chunk back to Telegram.
   - TG→Zalo reverse mappings survive a process restart, so a later Zalo reply still points to the original Telegram message instead of appearing without a quote.
