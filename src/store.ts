@@ -966,6 +966,102 @@ const _sentByZaloId = new Map<string, number>();       // String(zaloMsgId) → 
 const _sentKeyOrder: number[] = [];
 const SENT_MAP_MAX = 5000;
 
+// Persist TG→Zalo reverse mappings separately from msgStore. msgStore is capped
+// by Zalo IDs and can evict a Telegram-originated message sooner when a busy
+// group produces multiple aliases per message. sentMsgStore used to survive only
+// in memory, so after a restart Zalo replies to those TG messages lost their
+// native Telegram reply target even though they worked before the restart.
+interface SentMsgDiskData {
+  v: 1;
+  entries: [number, (string | number)[], string, 0 | 1][];
+}
+
+const _sentMsgMapFile = path.resolve(config.dataDir, 'sent-msg-map.json.gz');
+
+function _loadSentMsgMap(): SentMsgDiskData['entries'] {
+  if (!existsSync(_sentMsgMapFile)) return [];
+  try {
+    let buf = readFileSync(_sentMsgMapFile);
+    if (buf[0] === 0x1F && buf[1] === 0x8B) buf = gunzipSync(buf);
+    const raw = JSON.parse(buf.toString('utf8')) as Partial<SentMsgDiskData>;
+    if (raw.v !== 1 || !Array.isArray(raw.entries)) return [];
+    return raw.entries.filter(entry =>
+      Array.isArray(entry)
+      && Number.isInteger(entry[0])
+      && entry[0] > 0
+      && Array.isArray(entry[1])
+      && typeof entry[2] === 'string'
+      && (entry[3] === 0 || entry[3] === 1),
+    ) as SentMsgDiskData['entries'];
+  } catch (e) {
+    console.warn('[sentMsgStore] Failed to load sent-msg-map:', e);
+    return [];
+  }
+}
+
+let _sentPersistTimer: ReturnType<typeof setTimeout> | null = null;
+function _flushSentPersist(): void {
+  if (_sentPersistTimer) { clearTimeout(_sentPersistTimer); _sentPersistTimer = null; }
+  try {
+    mkdirSync(path.dirname(_sentMsgMapFile), { recursive: true });
+    const entries: SentMsgDiskData['entries'] = _sentKeyOrder
+      .filter(tgMsgId => tgMsgId > 0)
+      .map(tgMsgId => {
+        const info = _sentMap.get(tgMsgId)!;
+        return [tgMsgId, info.msgIds, info.zaloId, info.threadType];
+      });
+    const data: SentMsgDiskData = { v: 1, entries };
+    const tmp = _sentMsgMapFile + '.tmp';
+    writeFileSync(tmp, gzipSync(JSON.stringify(data), { level: 9 }));
+    renameSync(tmp, _sentMsgMapFile);
+  } catch (e) {
+    console.warn('[sentMsgStore] Failed to persist sent-msg-map:', e);
+  }
+}
+
+function _scheduleSentPersist(): void {
+  if (_sentPersistTimer) return;
+  _sentPersistTimer = setTimeout(_flushSentPersist, 1000);
+}
+
+function _restoreSentEntry(tgMsgId: number, info: SentMsgInfo): void {
+  if (!_sentMap.has(tgMsgId)) _sentKeyOrder.push(tgMsgId);
+  _sentMap.set(tgMsgId, info);
+  for (const mid of info.msgIds) {
+    const id = String(mid);
+    if (id && id !== '0') _sentByZaloId.set(id, tgMsgId);
+  }
+}
+
+const _savedSentEntries = _loadSentMsgMap().slice(-SENT_MAP_MAX);
+for (const [tgMsgId, msgIds, zaloId, threadType] of _savedSentEntries) {
+  _restoreSentEntry(tgMsgId, { msgIds, zaloId, threadType });
+}
+
+// One-time migration for installations upgrading from the in-memory-only store:
+// recover the newest reverse mappings already present in the durable msgStore so
+// the first restart after this fix does not begin with an empty sent-msg map.
+if (_savedSentEntries.length === 0) {
+  const idsByTg = new Map<number, string[]>();
+  for (const zaloMsgId of _msgKeyOrder) {
+    const tgMsgId = _zaloToTg.get(zaloMsgId);
+    if (tgMsgId === undefined || tgMsgId <= 0) continue;
+    const ids = idsByTg.get(tgMsgId) ?? [];
+    ids.push(zaloMsgId);
+    idsByTg.set(tgMsgId, ids);
+  }
+  for (const [tgMsgId, msgIds] of [...idsByTg].slice(-SENT_MAP_MAX)) {
+    const quote = _tgToQuote.get(tgMsgId);
+    if (!quote) continue;
+    _restoreSentEntry(tgMsgId, {
+      msgIds,
+      zaloId: quote.zaloId,
+      threadType: quote.threadType,
+    });
+  }
+  if (_sentMap.size > 0) _scheduleSentPersist();
+}
+
 /** zaloId values currently being sent by the bot (to handle echo race condition) */
 const _pendingSendConvos = new Map<string, { since: number; count: number }>(); // zaloId → active sends
 
@@ -990,6 +1086,10 @@ export const sentMsgStore = {
     for (const mid of info.msgIds) {
       _sentByZaloId.set(String(mid), tgMsgId);
     }
+
+    // Synthetic negative IDs are used by auto-reply and are not real Telegram
+    // reply targets. Keep those in memory only; persist actual Telegram IDs.
+    if (tgMsgId > 0) _scheduleSentPersist();
 
     // Zalo can emit the self-echo before api.sendMessage/upload resolves,
     // especially in DMs. In that race, attachQuote() cannot resolve tgMsgId yet,
@@ -1255,6 +1355,7 @@ export const reactionSummaryStore = {
 
 export function flushStores(): void {
   _flushMsgPersist();
+  _flushSentPersist();
   _flushReactionSummaryPersist();
 }
 

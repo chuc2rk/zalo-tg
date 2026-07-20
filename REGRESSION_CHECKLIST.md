@@ -15,6 +15,7 @@ Before adding a feature, applying upstream changes, or committing a fix, preserv
   - Telegram/Zalo reply quote metadata keeps rich file/media previews and `cliMsgId` fallbacks.
   - Forwarded bridge-generated sender-only media captions/text headers are stripped, real captions/text preserved, including scan badges like `🔵` and `BẠN / ━━━━━━━━` headers.
   - TG→Zalo long text split into chunks saves all returned Zalo `msgId`s so later self-echo/reply handling does not leak the last chunk back to Telegram.
+  - TG→Zalo reverse mappings survive a process restart, so a later Zalo reply still points to the original Telegram message instead of appearing without a quote.
   - Concurrent TG→Zalo sends to the same conversation keep pending echo suppression ref-counted; one fast send must not clear suppression while another long/forwarded send is still active.
   - DM topic name sync avoids unchanged Telegram renames to prevent 429/TOPIC_NOT_MODIFIED spam.
   - Zalo→Telegram sender badges stay deterministic and HTML-safe without breaking captions/replies.
