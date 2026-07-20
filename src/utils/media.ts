@@ -5,10 +5,12 @@ import { readFile, writeFile } from 'fs/promises';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { gunzipSync } from 'zlib';
+import ffmpegPath from 'ffmpeg-static';
 import path from 'path';
 import os from 'os';
 
 const TMP_DIR = path.join(os.tmpdir(), 'zalo-tg');
+const FFMPEG_BIN = ffmpegPath || 'ffmpeg';
 
 function configuredLocalBotApiDataDir(): string | null {
   const raw = process.env.TGBOTAPI_DATA_DIR;
@@ -132,7 +134,7 @@ export async function convertToM4a(inputPath: string): Promise<string> {
   mkdirSync(TMP_DIR, { recursive: true });
   const outputPath = path.join(TMP_DIR, `voice_${Date.now()}.m4a`);
   await new Promise<void>((resolve, reject) => {
-    const ff = spawn('ffmpeg', [
+    const ff = spawn(FFMPEG_BIN, [
       '-y', '-i', inputPath,
       // Keep an iOS/Android-friendly AAC-LC profile and put moov atom first.
       // Some mobile clients show "--:--" or fail playback if metadata is tail-loaded.
@@ -156,7 +158,7 @@ export async function convertWebmToGif(inputPath: string): Promise<string> {
   // Two-pass palette for better quality; scale to max 256px wide
   const palettePass = path.join(TMP_DIR, `palette_${Date.now()}.png`);
   await new Promise<void>((resolve, reject) => {
-    const ff = spawn('ffmpeg', [
+    const ff = spawn(FFMPEG_BIN, [
       '-y', '-i', inputPath,
       '-vf', 'fps=15,scale=min(256\\,iw):-2:flags=lanczos,palettegen=stats_mode=diff',
       palettePass,
@@ -165,7 +167,7 @@ export async function convertWebmToGif(inputPath: string): Promise<string> {
     ff.on('error', reject);
   });
   await new Promise<void>((resolve, reject) => {
-    const ff = spawn('ffmpeg', [
+    const ff = spawn(FFMPEG_BIN, [
       '-y', '-i', inputPath, '-i', palettePass,
       '-lavfi', 'fps=15,scale=min(256\\,iw):-2:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=5',
       outputPath,
@@ -243,7 +245,7 @@ export async function extractVideoThumbnail(videoPath: string): Promise<string> 
   mkdirSync(TMP_DIR, { recursive: true });
   const outputPath = path.join(TMP_DIR, `thumb_${Date.now()}.jpg`);
   await new Promise<void>((resolve, reject) => {
-    const ff = spawn('ffmpeg', [
+    const ff = spawn(FFMPEG_BIN, [
       '-y', '-i', videoPath,
       '-vframes', '1',
       '-q:v', '5',    // quality 1-31, lower=better; 5 is ~90% JPEG
