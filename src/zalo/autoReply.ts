@@ -1,9 +1,10 @@
-import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import path from 'path';
 import { ThreadType } from 'zca-js';
 import { config } from '../config.js';
 import { sentMsgStore } from '../store.js';
 import type { ZaloAPI } from './types.js';
+import { atomicWriteJson } from '../utils/safeFile.js';
 
 /**
  * Bridge-level auto-reply ("offline mode").
@@ -67,7 +68,7 @@ load();
 
 function save(): void {
   try {
-    writeFileSync(FILE, JSON.stringify(state, null, 2), 'utf8');
+    atomicWriteJson(FILE, state);
   } catch (err) {
     console.warn('[AutoReply] Failed to save state:', err);
   }

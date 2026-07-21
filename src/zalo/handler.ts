@@ -2,6 +2,7 @@ import { ThreadType, FriendEventType } from 'zca-js';
 import type { TelegramEmoji } from 'telegraf/types';
 import { createReadStream } from 'fs';
 import path from 'path';
+import { fetchTrustedBankcardHtml, safeTelegramLinkHtml } from '../utils/urlSafety.js';
 import QRCode from 'qrcode';
 
 import type { ZaloAPI, ZaloMessage, ZaloMediaContent, ZaloGroupInfoResponse } from './types.js';
@@ -1478,8 +1479,7 @@ ${html}`
           console.warn('[ZaloHandler] Link: no URL found in content:', JSON.stringify(rawMedia));
           return;
         }
-        const safeTitle = escapeHtml(title);
-        const linkText  = appendSenderFooter(`<a href="${href}">${safeTitle}</a>`);
+        const linkText  = appendSenderFooter(safeTelegramLinkHtml(href, title));
         const sent = await tg.sendMessage(config.telegram.groupId, linkText, {
           ...tgBase,
           parse_mode: 'HTML',
@@ -1500,8 +1500,7 @@ ${html}`
             };
             const dataUrl = parsedParams.pcItem?.data_url ?? parsedParams.item?.data_url;
             if (dataUrl) {
-              const htmlResp = await fetch(`${dataUrl}?data=html`);
-              const html = await htmlResp.text();
+              const html = await fetchTrustedBankcardHtml(dataUrl);
               const info = parseBankCardHtml(html);
               if (info) {
                 const qrBuf = await QRCode.toBuffer(info.vietqr, {
@@ -1509,9 +1508,9 @@ ${html}`
                   color: { dark: '#000000ff', light: '#ffffffff' },
                 });
                 let caption = `🏦 <b>Tài khoản ngân hàng</b>`;
-                if (info.bankName)      caption += `\nNgân hàng: <b>${info.bankName}</b>`;
-                if (info.accountNumber) caption += `\nSTK: <code>${info.accountNumber}</code>`;
-                if (info.holderName)    caption += `\nChủ TK: <b>${info.holderName}</b>`;
+                if (info.bankName)      caption += `\nNgân hàng: <b>${escapeHtml(info.bankName)}</b>`;
+                if (info.accountNumber) caption += `\nSTK: <code>${escapeHtml(info.accountNumber)}</code>`;
+                if (info.holderName)    caption += `\nChủ TK: <b>${escapeHtml(info.holderName)}</b>`;
                 const fullCaption = appendSenderFooter(caption);
                 const sent = await tg.sendPhoto(
                   config.telegram.groupId,

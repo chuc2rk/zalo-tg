@@ -1,12 +1,13 @@
 import { Zalo, LoginQRCallbackEventType } from 'zca-js';
 import type { LoginQRCallback } from 'zca-js';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, statSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { imageSizeFromFile } from 'image-size/fromFile';
 import qrcode from 'qrcode-terminal';
 import { config } from '../config.js';
 import type { ZaloAPI } from './types.js';
+import { atomicWriteJson, ensurePrivateFileMode } from '../utils/safeFile.js';
 
 // Use os.tmpdir() so it works on Windows (e.g. C:\Users\...\AppData\Local\Temp)
 // as well as macOS/Linux (/tmp or /var/folders/...).
@@ -52,11 +53,11 @@ export interface QRLoginHooks {
 
 function saveCredentials(data: { cookie: unknown; imei: string; userAgent: string }): void {
   try {
-    writeFileSync(
-      config.zalo.credentialsPath,
-      JSON.stringify({ imei: data.imei, cookie: data.cookie, userAgent: data.userAgent }, null, 2),
-      'utf8',
-    );
+    atomicWriteJson(config.zalo.credentialsPath, {
+      imei: data.imei,
+      cookie: data.cookie,
+      userAgent: data.userAgent,
+    });
     console.log(`[Zalo] Credentials saved → ${config.zalo.credentialsPath}`);
   } catch (err) {
     console.error('[Zalo] Failed to save credentials:', err);
@@ -157,6 +158,10 @@ export async function getZaloApi(): Promise<ZaloAPI> {
   if (!existsSync(config.zalo.credentialsPath)) {
     throw new Error('Chưa có file credentials.json — hãy gửi /login trong Telegram để đăng nhập lần đầu.');
   }
+
+  ensurePrivateFileMode(config.zalo.credentialsPath);
+  const appSessionPath = path.join(path.dirname(config.zalo.credentialsPath), 'app-session.json');
+  if (existsSync(appSessionPath)) ensurePrivateFileMode(appSessionPath);
 
   const zalo = new Zalo(ZALO_OPTIONS);
 

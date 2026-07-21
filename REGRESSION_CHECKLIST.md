@@ -20,6 +20,9 @@ Before adding a feature, applying upstream changes, or committing a fix, preserv
   - Zalo→Telegram albums map each Telegram media-group item to its matching Zalo photo IDs/quote, even when another album item fails to download.
   - Zalo→Telegram album buffering must not double-download or leak unused eager photo downloads.
   - Local Bot API `file://` downloads copy into bridge temp storage without deleting the server-owned source file.
+  - Zalo shared links accept only valid HTTP(S) URLs and remain HTML-safe; bank-card server fetches accept only trusted Zalo HTTPS hosts with timeout/size limits.
+  - Credentials, app-session and auto-reply state are written atomically with owner-only (`0600`) permissions.
+  - Scheduled backups exclude auth/session secrets by default; secret-inclusive recovery backups must be GPG-encrypted and never upload the plaintext archive.
   - Telegram video/TGS/static stickers retain animation or transparency when bridged to Zalo, with thumbnail/original fallbacks if rendering fails.
   - Zalo animated sticker sprite sheets are converted to real Telegram GIF animations; conversion/upload failures retain a visible static fallback.
   - Telegram GIF animations arrive from Bot API as MP4 (`animation.gif.mp4`) but are transcoded to a real `.gif` before sending to Zalo.
