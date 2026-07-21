@@ -132,7 +132,7 @@ export function applyZaloMarkupHtml(
 
 const SENDER_BADGES = ['🟦', '🟩', '🟪', '🟧', '🟥', '🟨', '🔵', '🟢', '🟣', '🟠', '🔴', '🟡', '🔷', '🔶', '🔹', '🔸', '⬛', '⬜', '🟤'] as const;
 const SENDER_ACCENTS = ['▌', '●', '◆', '■', '▲', '✦', '✚', '⬢'] as const;
-const GROUP_MESSAGE_SEPARATOR = '━━━━━━━━';
+const SENDER_FOOTER_PREFIX = '└ ';
 
 function stableHash(text: string): number {
   let hash = 2166136261;
@@ -175,17 +175,16 @@ export function senderLabel(senderName: string, stableKey?: string): string {
 
 function senderHeader(senderName: string, stableKey?: string): string {
   const displayName = truncate(senderName, 64).toLocaleUpperCase('vi-VN');
-  return `${escapeHtml(senderMarker(senderName, stableKey))} <b>${escapeHtml(displayName)}</b>`;
+  return `${SENDER_FOOTER_PREFIX}${escapeHtml(senderMarker(senderName, stableKey))} <b>${escapeHtml(displayName)}</b>`;
 }
 
 /**
- * Format a group message as a visually-scannable sender block:
- *   🟪◆ <b>SenderName</b>
- *   ━━━━━━━━
+ * Format a group message with the content first and sender attribution below:
  *   content…
+ *   └ 🟪◆ <b>SenderName</b>
  */
 export function formatGroupMsg(senderName: string, content: string, stableKey?: string): string {
-  return `${senderHeader(senderName, stableKey)}\n${GROUP_MESSAGE_SEPARATOR}\n${escapeHtml(truncate(content))}`;
+  return `${escapeHtml(truncate(content))}\n${senderHeader(senderName, stableKey)}`;
 }
 
 /**
@@ -193,13 +192,12 @@ export function formatGroupMsg(senderName: string, content: string, stableKey?: 
  * have already been wrapped in <b> tags).
  */
 export function formatGroupMsgHtml(senderName: string, bodyHtml: string, stableKey?: string): string {
-  return `${senderHeader(senderName, stableKey)}\n${GROUP_MESSAGE_SEPARATOR}\n${bodyHtml}`;
+  return `${bodyHtml}\n${senderHeader(senderName, stableKey)}`;
 }
 
-/** Caption for group media. Includes a stable sender marker for scanability. */
+/** Sender attribution used as the final line of media captions. */
 export function groupCaption(senderName: string, stableKey?: string): string {
-  const displayName = truncate(senderName, 64).toLocaleUpperCase('vi-VN');
-  return `${escapeHtml(senderMarker(senderName, stableKey))} <b>${escapeHtml(displayName)}</b>`;
+  return senderHeader(senderName, stableKey);
 }
 
 /**

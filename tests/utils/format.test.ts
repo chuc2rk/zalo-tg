@@ -123,8 +123,8 @@ describe('sender scan marker', () => {
 });
 
 describe('formatGroupMsg', () => {
-  it('formats with sender marker, sender name, separator, and content', () => {
-    expect(formatGroupMsg('Alice', 'Hello', 'uid-a')).toMatch(/^\S+ <b>ALICE<\/b>\n━━━━━━━━\nHello$/u);
+  it('formats content first, then separator and sender attribution', () => {
+    expect(formatGroupMsg('Alice', 'Hello', 'uid-a')).toMatch(/^Hello\n└ \S+ <b>ALICE<\/b>$/u);
   });
 
   it('escapes sender name and content', () => {
@@ -136,20 +136,21 @@ describe('formatGroupMsg', () => {
   it('truncates long sender names', () => {
     const longName = 'A'.repeat(100);
     const result = formatGroupMsg(longName, 'Hi');
-    expect(result).toContain('<b>');
-    expect(result.split('</b>')[0].length).toBeLessThanOrEqual(80);
+    const displayedName = result.match(/<b>([^<]+)<\/b>/)?.[1];
+    expect(displayedName).toBeDefined();
+    expect(displayedName!.length).toBeLessThanOrEqual(65);
   });
 });
 
 describe('formatGroupMsgHtml', () => {
-  it('wraps sender in bold with pre-escaped body', () => {
-    expect(formatGroupMsgHtml('Alice', '<b>Hello</b>', 'uid-a')).toMatch(/^\S+ <b>ALICE<\/b>\n━━━━━━━━\n<b>Hello<\/b>$/u);
+  it('keeps pre-escaped body first and puts the bold sender below', () => {
+    expect(formatGroupMsgHtml('Alice', '<b>Hello</b>', 'uid-a')).toMatch(/^<b>Hello<\/b>\n└ \S+ <b>ALICE<\/b>$/u);
   });
 });
 
 describe('groupCaption', () => {
   it('returns sender marker plus bold uppercase sender name', () => {
-    expect(groupCaption('Alice', 'uid-a')).toMatch(/^\S+ <b>ALICE<\/b>$/u);
+    expect(groupCaption('Alice', 'uid-a')).toMatch(/^└ \S+ <b>ALICE<\/b>$/u);
   });
 
   it('uppercases Vietnamese sender names for media captions', () => {
