@@ -124,37 +124,39 @@ describe('sender scan marker', () => {
 
 describe('formatGroupMsg', () => {
   it('formats content first, then separator and sender attribution', () => {
-    expect(formatGroupMsg('Alice', 'Hello', 'uid-a')).toMatch(/^Hello\n└ \S+ <b>ALICE<\/b>$/u);
+    expect(formatGroupMsg('Alice', 'Hello', 'uid-a')).toMatch(/^Hello\n└ \S+ Alice$/u);
   });
 
   it('escapes sender name and content', () => {
     const result = formatGroupMsg('A < B', 'x & y', 'uid-a');
-    expect(result).toContain('<b>A &lt; B</b>');
+    expect(result).toContain('A &lt; B');
+    expect(result).not.toContain('<b>A &lt; B</b>');
     expect(result).toContain('x &amp; y');
   });
 
   it('truncates long sender names', () => {
     const longName = 'A'.repeat(100);
     const result = formatGroupMsg(longName, 'Hi');
-    const displayedName = result.match(/<b>([^<]+)<\/b>/)?.[1];
+    const displayedName = result.split(' ').at(-1);
     expect(displayedName).toBeDefined();
     expect(displayedName!.length).toBeLessThanOrEqual(65);
   });
 });
 
 describe('formatGroupMsgHtml', () => {
-  it('keeps pre-escaped body first and puts the bold sender below', () => {
-    expect(formatGroupMsgHtml('Alice', '<b>Hello</b>', 'uid-a')).toMatch(/^<b>Hello<\/b>\n└ \S+ <b>ALICE<\/b>$/u);
+  it('keeps pre-escaped body first and puts the plain sender below', () => {
+    expect(formatGroupMsgHtml('Alice', '<b>Hello</b>', 'uid-a')).toMatch(/^<b>Hello<\/b>\n└ \S+ Alice$/u);
   });
 });
 
 describe('groupCaption', () => {
-  it('returns sender marker plus bold uppercase sender name', () => {
-    expect(groupCaption('Alice', 'uid-a')).toMatch(/^└ \S+ <b>ALICE<\/b>$/u);
+  it('returns sender marker plus plain sender name', () => {
+    expect(groupCaption('Alice', 'uid-a')).toMatch(/^└ \S+ Alice$/u);
   });
 
-  it('uppercases Vietnamese sender names for media captions', () => {
-    expect(groupCaption('Nguyễn Văn A', 'uid-a')).toContain('<b>NGUYỄN VĂN A</b>');
+  it('preserves Vietnamese sender-name casing for media captions', () => {
+    expect(groupCaption('Nguyễn Văn A', 'uid-a')).toContain('Nguyễn Văn A');
+    expect(groupCaption('Nguyễn Văn A', 'uid-a')).not.toContain('<b>');
   });
 });
 

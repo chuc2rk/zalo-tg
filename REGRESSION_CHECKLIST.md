@@ -34,6 +34,6 @@ Before adding a feature, applying upstream changes, or committing a fix, preserv
   - TG→Zalo reverse mappings survive a process restart, so a later Zalo reply still points to the original Telegram message instead of appearing without a quote.
   - Concurrent TG→Zalo sends to the same conversation keep pending echo suppression ref-counted; one fast send must not clear suppression while another long/forwarded send is still active.
   - DM topic name sync avoids unchanged Telegram renames to prevent 429/TOPIC_NOT_MODIFIED spam.
-  - Zalo→Telegram sender badges stay deterministic and HTML-safe without breaking captions/replies.
+  - Zalo→Telegram sender badges stay deterministic and HTML-safe without breaking captions/replies; sender names preserve source casing and remain plain (not bold/forced uppercase) so they do not overpower message content.
 
 Rule from Chức: **new fixes/features must not regress old patches we already spent time fixing.**

@@ -174,14 +174,14 @@ export function senderLabel(senderName: string, stableKey?: string): string {
 }
 
 function senderHeader(senderName: string, stableKey?: string): string {
-  const displayName = truncate(senderName, 64).toLocaleUpperCase('vi-VN');
-  return `${SENDER_FOOTER_PREFIX}${escapeHtml(senderMarker(senderName, stableKey))} <b>${escapeHtml(displayName)}</b>`;
+  const displayName = truncate(senderName, 64);
+  return `${SENDER_FOOTER_PREFIX}${escapeHtml(senderMarker(senderName, stableKey))} ${escapeHtml(displayName)}`;
 }
 
 /**
  * Format a group message with the content first and sender attribution below:
  *   content…
- *   └ 🟪◆ <b>SenderName</b>
+ *   └ 🟪◆ SenderName
  */
 export function formatGroupMsg(senderName: string, content: string, stableKey?: string): string {
   return `${escapeHtml(truncate(content))}\n${senderHeader(senderName, stableKey)}`;
