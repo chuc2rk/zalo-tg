@@ -39,8 +39,12 @@ describe('downloadToTemp local Bot API file paths', () => {
     const tempPath = await downloadToTemp(pathToFileURL(containerPath).toString(), 'Bao cao.pdf');
 
     expect(existsSync(tempPath)).toBe(true);
-    expect(existsSync(hostPath)).toBe(false);
+    expect(existsSync(hostPath)).toBe(true);
+    expect(readFileSync(hostPath, 'utf8')).toBe('pdf-bytes');
+    const secondTempPath = await downloadToTemp(pathToFileURL(containerPath).toString(), 'Bao cao.pdf');
+    expect(existsSync(secondTempPath)).toBe(true);
     await cleanTemp(tempPath);
+    await cleanTemp(secondTempPath);
   });
 });
 

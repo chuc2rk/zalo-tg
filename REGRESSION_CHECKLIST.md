@@ -16,6 +16,10 @@ Before adding a feature, applying upstream changes, or committing a fix, preserv
   - Forwarded bridge-generated sender-only media captions/text headers are stripped, real captions/text preserved, including scan badges like `🔵` and `BẠN / ━━━━━━━━` headers.
   - Telegram forwards never inherit the forum topic root as a Zalo quote, and sender-only forwarded media captions are stripped before any reply auto-mention is added.
   - TG media groups wait long enough for all selected photos/videos to join the same Zalo send; forwarding two photos must not silently flush only the first item.
+  - TG→Zalo media groups keep reverse mappings per attachment and visibly warn in the Telegram topic when only part of an album can be downloaded/sent.
+  - Zalo→Telegram albums map each Telegram media-group item to its matching Zalo photo IDs/quote, even when another album item fails to download.
+  - Zalo→Telegram album buffering must not double-download or leak unused eager photo downloads.
+  - Local Bot API `file://` downloads copy into bridge temp storage without deleting the server-owned source file.
   - Telegram video/TGS/static stickers retain animation or transparency when bridged to Zalo, with thumbnail/original fallbacks if rendering fails.
   - Zalo animated sticker sprite sheets are converted to real Telegram GIF animations; conversion/upload failures retain a visible static fallback.
   - Telegram GIF animations arrive from Bot API as MP4 (`animation.gif.mp4`) but are transcoded to a real `.gif` before sending to Zalo.

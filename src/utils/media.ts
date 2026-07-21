@@ -73,8 +73,9 @@ export async function downloadToTemp(url: string, fileName?: string, retries = 3
     const baseName = sanitizeFileName(fileName ?? path.basename(srcPath));
     const destPath = path.join(TMP_DIR, `${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${baseName}`);
     copyFileSync(srcPath, destPath);
-    // Delete the original from local server's data dir — it's been delivered, no longer needed
-    await unlink(srcPath).catch(() => undefined);
+    // The source belongs to the local Telegram Bot API server/cache, not to this
+    // bridge. Only the copied temp file is ours to clean up; deleting srcPath can
+    // race another delivery of the same file_id and cause ENOENT/data loss.
     return destPath;
   }
 

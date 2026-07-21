@@ -950,11 +950,9 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
       const _eagerMediaUrl = (() => {
         if (msgType === ZALO_MSG_TYPES.VIDEO || msgType === ZALO_MSG_TYPES.VOICE ||
             msgType === ZALO_MSG_TYPES.GIF   || msgType === ZALO_MSG_TYPES.FILE) return media.href;
-        if (msgType === ZALO_MSG_TYPES.PHOTO) {
-          let u = media.href;
-          try { const p = JSON.parse(media.params ?? '{}') as { hd?: string }; if (p.hd) u = p.hd; } catch {}
-          return u;
-        }
+        // PHOTO is intentionally excluded: it may belong to an album. Starting
+        // an eager download here caused album photos to be downloaded twice and
+        // left the unused early temp files behind.
         return undefined;
       })();
       const _extGuess = _eagerMediaUrl
@@ -1206,14 +1204,12 @@ ${html}`
 
         zaloAlbumStore.add(
           albumKey,
-          url,
-          zaloMsgIds,
-          { senderName: bridgeSenderName, topicId, tgBase, zaloQuote: zaloQuoteData },
+          { url, msgIds: zaloMsgIds, quote: zaloQuoteData, caption: photoCaption },
+          { senderName: bridgeSenderName, topicId, tgBase },
           async (buf) => {
-            if (buf.urls.length === 1) {
-              // Single photo — reuse eagerly started download (likely already done)
-              const singleUrl = buf.urls[0]!;
-              const localPath = await (earlyDlPromise ?? downloadToTemp(singleUrl, `photo_${Date.now()}.jpg`));
+            if (buf.items.length === 1) {
+              const item = buf.items[0]!;
+              const localPath = await downloadToTemp(item.url, `photo_${Date.now()}.jpg`);
               const stream = createReadStream(localPath);
               try {
                 const sent = await tg.sendPhoto(
@@ -1222,38 +1218,43 @@ ${html}`
                   {
                     ...buf.tgBase,
                     parse_mode: 'HTML' as const,
-                    caption: photoCaption
-                      ? appendSenderFooter(escapeHtml(photoCaption))
+                    caption: item.caption
+                      ? appendSenderFooter(escapeHtml(item.caption))
                       : appendSenderFooter(),
                   },
                 );
-                // Use buf.zaloQuote which already has the correct cliMsgId and
+                // Use the item's quote which already has the correct cliMsgId and
                 // parsed media content object (not raw JSON string).
-                msgStore.save(sent.message_id, buf.zaloMsgIds, buf.zaloQuote!);
+                msgStore.save(sent.message_id, item.msgIds, item.quote);
               } finally { await cleanTemp(localPath); }
             } else {
               // Multi-photo album — download all concurrently and send as media group
               const localPaths: string[] = [];
               try {
-                const dlResults = await Promise.allSettled(buf.urls.map(u => downloadToTemp(u, `photo_${Date.now()}.jpg`)));
-                const dlPaths = dlResults.flatMap(r => {
-                  if (r.status === 'fulfilled') return [r.value];
-                  console.warn('[ZaloHandler] Album: skipping failed photo download:', r.reason);
+                const dlResults = await Promise.allSettled(
+                  buf.items.map(item => downloadToTemp(item.url, `photo_${Date.now()}.jpg`)),
+                );
+                const downloadedItems = dlResults.flatMap((result, index) => {
+                  if (result.status === 'fulfilled') {
+                    return [{ localPath: result.value, item: buf.items[index]! }];
+                  }
+                  console.warn('[ZaloHandler] Album: skipping failed photo download:', result.reason);
                   return [];
                 });
-                if (dlPaths.length === 0) return;
-                localPaths.push(...dlPaths);
-                const captionText = photoCaption
-                  ? appendSenderFooter(escapeHtml(photoCaption))
+                if (downloadedItems.length === 0) return;
+                localPaths.push(...downloadedItems.map(item => item.localPath));
+                const albumCaption = downloadedItems.find(item => item.item.caption)?.item.caption;
+                const captionText = albumCaption
+                  ? appendSenderFooter(escapeHtml(albumCaption))
                   : appendSenderFooter();
                 // Telegram limits media groups to 10 items — split into batches
                 const BATCH = 10;
-                for (let i = 0; i < localPaths.length; i += BATCH) {
-                  const batch = localPaths.slice(i, i + BATCH);
+                for (let i = 0; i < downloadedItems.length; i += BATCH) {
+                  const batch = downloadedItems.slice(i, i + BATCH);
                   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  const mediaItems: any[] = batch.map((lp, j) => ({
+                  const mediaItems: any[] = batch.map(({ localPath }, j) => ({
                     type: 'photo',
-                    media: { source: createReadStream(lp) },
+                    media: { source: createReadStream(localPath) },
                     ...(i === 0 && j === 0 && captionText ? { caption: captionText, parse_mode: 'HTML' } : {}),
                   }));
                   const sentMsgs = await tg.sendMediaGroup(
@@ -1261,10 +1262,14 @@ ${html}`
                     mediaItems,
                     { ...buf.tgBase, message_thread_id: buf.topicId } as Parameters<typeof tg.sendMediaGroup>[2],
                   );
-                  // Save mapping for every photo so replying to ANY album photo
-                  // produces a valid Zalo quote
-                  for (const sentMsg of sentMsgs) {
-                    msgStore.save(sentMsg.message_id, buf.zaloMsgIds, buf.zaloQuote!);
+                  // Keep the mapping one-to-one. Failed downloads were removed
+                  // before batching, so sentMsgs[j] still matches batch[j].
+                  for (let j = 0; j < sentMsgs.length; j++) {
+                    const sentMsg = sentMsgs[j];
+                    const downloaded = batch[j];
+                    if (sentMsg && downloaded) {
+                      msgStore.save(sentMsg.message_id, downloaded.item.msgIds, downloaded.item.quote);
+                    }
                   }
                 }
               } finally {

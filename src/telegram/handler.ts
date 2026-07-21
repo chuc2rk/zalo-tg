@@ -2906,6 +2906,14 @@ export function setupTelegramHandler(
           .catch(() => undefined);
       };
 
+      const notifyPartialMediaGroup = async (sentCount: number, totalCount: number) => {
+        await tgBot.telegram.sendMessage(
+          config.telegram.groupId,
+          `⚠️ Album chỉ gửi được ${sentCount}/${totalCount} tệp sang Zalo. Vui lòng gửi lại các tệp còn thiếu.`,
+          { message_thread_id: topicId },
+        ).catch(() => undefined);
+      };
+
       if ('text' in msg && msg.text) {
         // Skip bot commands that were already handled above
         if (msg.text.startsWith('/')) return;
@@ -3288,6 +3296,7 @@ export function setupTelegramHandler(
           }
           if (localPaths.length !== items.length) {
             console.warn(`[TG→Zalo] Media group partial download: ${localPaths.length}/${items.length} items (zaloId=${meta.zaloId})`);
+            await notifyPartialMediaGroup(localPaths.length, items.length);
           }
           if (localPaths.length === 0) return;
           sentMsgStore.markSending(meta.zaloId);
@@ -3305,20 +3314,32 @@ export function setupTelegramHandler(
               ) as Promise<{ message?: { msgId?: number } | null; attachment?: Array<{ msgId?: number }> }>,
               `sendMediaGroup(${localPaths.length} files)`,
             );
-            const zaloMsgIds: (string | number)[] = [];
-            if (sendResult?.message?.msgId != null) zaloMsgIds.push(sendResult.message.msgId);
-            if (sendResult?.attachment) {
-              for (const a of sendResult.attachment) {
-                if (a.msgId != null) zaloMsgIds.push(a.msgId);
-              }
-            }
+            const messageMsgId = sendResult?.message?.msgId;
+            const attachmentMsgIds = (sendResult?.attachment ?? [])
+              .map(a => a.msgId)
+              .filter((id): id is number => id != null);
+            const zaloMsgIds: (string | number)[] = [
+              ...(messageMsgId != null ? [messageMsgId] : []),
+              ...attachmentMsgIds,
+            ];
             if (zaloMsgIds.length > 0) {
               const ownUid = String(api.getOwnId?.() ?? '');
-              const attStartIdx = sendResult?.message?.msgId != null ? 1 : 0;
               for (let i = 0; i < downloadedTgIds.length; i++) {
                 const tgId = downloadedTgIds[i];
-                const msgIdForItem = zaloMsgIds[Math.min(attStartIdx + i, zaloMsgIds.length - 1)] ?? zaloMsgIds[0] ?? '';
-                sentMsgStore.save(tgId, { msgIds: zaloMsgIds, zaloId: meta.zaloId, threadType: meta.threadType });
+                const msgIdForItem = attachmentMsgIds[i]
+                  ?? (i === 0 ? messageMsgId : undefined);
+                if (msgIdForItem == null) {
+                  console.warn(`[TG→Zalo] Media group missing returned msgId for tgMsgId=${tgId}; reverse mapping skipped to avoid pointing at the wrong attachment`);
+                  continue;
+                }
+                // Each attachment reverse-maps only to its matching Telegram
+                // item. Associate the optional caption/text message with the
+                // first item so its self-echo is still suppressed/resolvable.
+                const reverseIds = [
+                  ...(i === 0 && messageMsgId != null ? [messageMsgId] : []),
+                  ...(msgIdForItem !== messageMsgId ? [msgIdForItem] : []),
+                ];
+                sentMsgStore.save(tgId, { msgIds: reverseIds, zaloId: meta.zaloId, threadType: meta.threadType });
                 msgStore.save(tgId, [String(msgIdForItem)], {
                   msgId: String(msgIdForItem),
                   cliMsgId: '',

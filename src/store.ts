@@ -1529,14 +1529,19 @@ export const mediaGroupStore = {
 
 // ── Zalo album buffer (Zalo→TG multi-photo) ────────────────────────────────────
 
+export interface ZaloAlbumItem {
+  url:       string;
+  msgIds:    string[];
+  quote:     ZaloQuoteData;
+  caption?:  string;
+}
+
 interface ZaloAlbumBuffer {
   timer:      ReturnType<typeof setTimeout>;
-  urls:       string[];
+  items:      ZaloAlbumItem[];
   senderName: string;
   topicId:    number;
   tgBase:     { message_thread_id: number; reply_parameters?: { message_id: number; allow_sending_without_reply: boolean }; disable_notification?: boolean };
-  zaloMsgIds: string[];
-  zaloQuote:  ZaloQuoteData | undefined;
 }
 
 const _zaloAlbumBuffers = new Map<string, ZaloAlbumBuffer>(); // key = `${threadId}:${uidFrom}`
@@ -1544,9 +1549,8 @@ const _zaloAlbumBuffers = new Map<string, ZaloAlbumBuffer>(); // key = `${thread
 export const zaloAlbumStore = {
   add(
     key: string,
-    url: string,
-    msgIds: string[],
-    meta: Omit<ZaloAlbumBuffer, 'timer' | 'urls' | 'zaloMsgIds'>,
+    item: ZaloAlbumItem,
+    meta: Omit<ZaloAlbumBuffer, 'timer' | 'items'>,
     onFlush: (buf: Omit<ZaloAlbumBuffer, 'timer'>) => void,
     childnumber = 0,
   ): void {
@@ -1558,13 +1562,14 @@ export const zaloAlbumStore = {
     if (childnumber === 0) {
       const existing = _zaloAlbumBuffers.get(key);
       if (existing) {
-        if (existing.urls.includes(url)) {
+        const duplicate = existing.items.find(existingItem => existingItem.url === item.url);
+        if (duplicate) {
           // Duplicate re-emit — absorb into existing buffer, don't flush
           clearTimeout(existing.timer);
-          existing.zaloMsgIds.push(...msgIds);
+          duplicate.msgIds.push(...item.msgIds);
           existing.timer = setTimeout(() => {
             _zaloAlbumBuffers.delete(key);
-            onFlush({ urls: existing.urls, zaloMsgIds: existing.zaloMsgIds, ...meta });
+            onFlush({ items: existing.items, ...meta });
           }, 200);
           console.log(`[zaloAlbumStore] Absorbed duplicate childnumber=0 event (key=${key}, url already in buffer)`);
           return;
@@ -1572,7 +1577,7 @@ export const zaloAlbumStore = {
         // Genuinely new album — flush old buffer first
         clearTimeout(existing.timer);
         _zaloAlbumBuffers.delete(key);
-        setImmediate(() => onFlush({ urls: existing.urls, zaloMsgIds: existing.zaloMsgIds, ...meta }));
+        setImmediate(() => onFlush({ items: existing.items, ...meta }));
       }
     }
     const existing = _zaloAlbumBuffers.get(key);
@@ -1581,24 +1586,24 @@ export const zaloAlbumStore = {
       // Deduplicate URLs — Zalo group chats can re-emit the same photo event
       // with a different msgId, causing identical images to be buffered.
       // Only add the URL if it's not already in the buffer.
-      if (!existing.urls.includes(url)) {
-        existing.urls.push(url);
+      const duplicate = existing.items.find(existingItem => existingItem.url === item.url);
+      if (!duplicate) {
+        existing.items.push(item);
       } else {
-        console.log(`[zaloAlbumStore] Skipping duplicate URL in album buffer (key=${key}, urls=${existing.urls.length})`);
+        duplicate.msgIds.push(...item.msgIds);
+        console.log(`[zaloAlbumStore] Merged duplicate URL in album buffer (key=${key}, items=${existing.items.length})`);
       }
-      existing.zaloMsgIds.push(...msgIds);
       existing.timer = setTimeout(() => {
         _zaloAlbumBuffers.delete(key);
-        onFlush({ urls: existing.urls, zaloMsgIds: existing.zaloMsgIds, ...meta });
+        onFlush({ items: existing.items, ...meta });
       }, 200);
     } else {
       const buf: ZaloAlbumBuffer = {
         ...meta,
-        urls: [url],
-        zaloMsgIds: [...msgIds],
+        items: [{ ...item, msgIds: [...item.msgIds] }],
         timer: setTimeout(() => {
           _zaloAlbumBuffers.delete(key);
-          onFlush({ urls: buf.urls, zaloMsgIds: buf.zaloMsgIds, ...meta });
+          onFlush({ items: buf.items, ...meta });
         }, 200),
       };
       _zaloAlbumBuffers.set(key, buf);

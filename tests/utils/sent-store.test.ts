@@ -21,4 +21,24 @@ describe('sentMsgStore concurrent send suppression', () => {
     expect(sentMsgStore._testPendingCount(zaloId)).toBe(0);
     expect(sentMsgStore.isSendingTo(zaloId)).toBe(false);
   });
+
+  it('keeps album attachment reverse mappings one-to-one', () => {
+    const suffix = Date.now();
+    const firstTgId = 800_000_000 + (suffix % 10_000_000);
+    const secondTgId = firstTgId + 1;
+    const captionMsgId = `caption-${suffix}`;
+    const firstAttachmentId = `attachment-a-${suffix}`;
+    const secondAttachmentId = `attachment-b-${suffix}`;
+
+    sentMsgStore.save(firstTgId, {
+      msgIds: [captionMsgId, firstAttachmentId], zaloId: 'album-group', threadType: 1,
+    });
+    sentMsgStore.save(secondTgId, {
+      msgIds: [secondAttachmentId], zaloId: 'album-group', threadType: 1,
+    });
+
+    expect(sentMsgStore.getByZaloMsgId(captionMsgId)).toBe(firstTgId);
+    expect(sentMsgStore.getByZaloMsgId(firstAttachmentId)).toBe(firstTgId);
+    expect(sentMsgStore.getByZaloMsgId(secondAttachmentId)).toBe(secondTgId);
+  });
 });
