@@ -1,6 +1,6 @@
 import { getZaloApi, resetZaloApi } from './zalo/client.js';
 import { CloseReason, ThreadType } from 'zca-js';
-import { setupZaloHandler } from './zalo/handler.js';
+import { cancelGroupHistoryRequest, setupZaloHandler } from './zalo/handler.js';
 import { tgBot, syncTelegramCommands } from './telegram/bot.js';
 import { setupTelegramHandler } from './telegram/handler.js';
 import { config } from './config.js';
@@ -94,20 +94,19 @@ async function startZalo(
     pruneLeftGroupTopics(api).catch(err => console.warn('[Boot] pruneLeftGroupTopics error:', err));
   }
   await setupZaloHandler(api);
-  if (isReconnect) {
-    api.listener.once('connected', () => {
-      try {
-        // Recover recent gap after disconnect (messages + reactions in both DM/group).
-        api.listener.requestOldMessages(ThreadType.User);
-        api.listener.requestOldMessages(ThreadType.Group);
-        api.listener.requestOldReactions(ThreadType.User);
-        api.listener.requestOldReactions(ThreadType.Group);
-        console.log('[Boot] Requested catch-up sync after reconnect');
-      } catch (err) {
-        console.warn('[Boot] Failed to request catch-up sync:', err);
-      }
-    });
-  }
+  api.listener.once('connected', () => {
+    try {
+      // Recover recent gaps after both normal startup and reconnect. The main
+      // handler deduplicates messages already bridged to Telegram.
+      api.listener.requestOldMessages(ThreadType.User);
+      api.listener.requestOldMessages(ThreadType.Group);
+      api.listener.requestOldReactions(ThreadType.User);
+      api.listener.requestOldReactions(ThreadType.Group);
+      console.log(`[Boot] Requested catch-up sync after ${isReconnect ? 'reconnect' : 'startup'}`);
+    } catch (err) {
+      console.warn('[Boot] Failed to request catch-up sync:', err);
+    }
+  });
   api.listener.start();
   console.log(`[Boot] Zalo listener ${isReconnect ? 're' : ''}started ✓`);
 
@@ -141,6 +140,7 @@ async function startZalo(
 
   // Auto-reconnect only on closings that are safe to recover automatically.
   api.listener.once('disconnected', (code: CloseReason, reason: string) => {
+    cancelGroupHistoryRequest(api);
     if (code === CloseReason.ManualClosure) return;
     if (code === CloseReason.DuplicateConnection) {
       console.warn(`[Boot] Zalo disconnected: duplicate connection (code=${code}, reason=${reason})`);

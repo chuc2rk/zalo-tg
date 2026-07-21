@@ -142,7 +142,7 @@ const execFileAsync = promisify(execFile);
 
 import type { ZaloAPI, ZaloMessage } from '../zalo/types.js';
 import { ZALO_MSG_TYPES } from '../zalo/types.js';
-import { syncDmTopicNamesFromCache, replayHistoryMessages } from '../zalo/handler.js';
+import { syncDmTopicNamesFromCache, replayHistoryMessages, requestGroupHistory } from '../zalo/handler.js';
 import { store, msgStore, userCache, friendsCache, groupsCache, sentMsgStore, pollStore, mediaGroupStore, reactionEchoStore, reactionSummaryStore, reactionEventDedupeStore, aliasCache, nameCache, markRecalled, wasRecallConfirmed, type ZaloQuoteData } from '../store.js';
 import { getAutoReplyState, setAutoReplyEnabled, AUTO_REPLY_COOLDOWN_MIN, AUTO_REPLY_MAX_PER_HOUR } from '../zalo/autoReply.js';
 import { tgBot } from './bot.js';
@@ -1211,9 +1211,8 @@ export function setupTelegramHandler(
   tgBot.command('group_info', async (ctx) => handleGroupInfoCommand(ctx));
   tgBot.command('group_infoall', async (ctx) => handleGroupInfoCommand(ctx, true));
 
-  // /history [N] — backfill old GROUP chat history into the current topic.
-  // Zalo's API only exposes group history (getGroupChatHistory); 1-1 DM history
-  // is not retrievable, so this is rejected for DM topics.
+  // /history [N] — backfill old GROUP chat history into the current topic via
+  // the live listener WebSocket. The former HTTP history endpoint returns 404.
   tgBot.command('history', async (ctx) => {
     if (ctx.chat.id !== config.telegram.groupId) return;
     const topicId = 'message_thread_id' in ctx.message
@@ -1259,8 +1258,7 @@ export function setupTelegramHandler(
         `⏳ Đang lấy ${count} tin nhắn gần nhất của nhóm...`,
         replyOpts,
       );
-      const res = await currentApi.getGroupChatHistory(entry.zaloId, count) as { groupMsgs?: unknown[] };
-      const msgs = Array.isArray(res?.groupMsgs) ? res.groupMsgs : [];
+      const msgs = await requestGroupHistory(currentApi, entry.zaloId, count);
       if (msgs.length === 0) {
         await ctx.telegram.sendMessage(config.telegram.groupId, 'ℹ️ Không có tin nhắn lịch sử nào.', replyOpts);
         return;

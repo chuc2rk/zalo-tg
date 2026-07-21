@@ -23,6 +23,7 @@ Before adding a feature, applying upstream changes, or committing a fix, preserv
   - Zalo shared links accept only valid HTTP(S) URLs and remain HTML-safe; bank-card server fetches accept only trusted Zalo HTTPS hosts with timeout/size limits.
   - Credentials, app-session and auto-reply state are written atomically with owner-only (`0600`) permissions.
   - Scheduled backups exclude auth/session secrets by default; secret-inclusive recovery backups must be GPG-encrypted and never upload the plaintext archive.
+  - Startup/reconnect catch-up and `/history` use listener WebSocket `old_messages`, never the removed HTTP `/api/group/history`; automatic catch-up accepts only recent timestamped messages and still deduplicates through `msgStore`.
   - Telegram video/TGS/static stickers retain animation or transparency when bridged to Zalo, with thumbnail/original fallbacks if rendering fails.
   - Zalo animated sticker sprite sheets are converted to real Telegram GIF animations; conversion/upload failures retain a visible static fallback.
   - Telegram GIF animations arrive from Bot API as MP4 (`animation.gif.mp4`) but are transcoded to a real `.gif` before sending to Zalo.

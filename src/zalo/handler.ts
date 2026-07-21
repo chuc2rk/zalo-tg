@@ -17,6 +17,7 @@ import type { ZaloStyle } from '../utils/format.js';
 import { msgStore, userCache, pollStore, sentMsgStore, zaloAlbumStore, reactionEchoStore, reactionEventDedupeStore, aliasCache, friendsCache, nameCache, recentlyRecalledMsgIds, markRecallConfirmed, type ZaloQuoteData } from '../store.js';
 import { tgQueue } from '../utils/tgQueue.js';
 import { maybeAutoReply } from './autoReply.js';
+import { GroupHistoryCoordinator, selectRecentHistory } from './history.js';
 
 // Proxy that routes every tg.* call through the rate-limit queue
 // so 429 errors are auto-retried instead of crashing the process.
@@ -683,19 +684,6 @@ const _inFlightMsgIds = new Set<string>();
 
 type HistoricalZaloMessage = ZaloMessage & { __catchup?: true };
 
-function normalizeHistoryMessage(raw: unknown, groupId: string): HistoricalZaloMessage | null {
-  const candidate = raw as Partial<ZaloMessage> & { data?: ZaloMessage['data'] };
-  const data = candidate?.data;
-  if (!data?.msgId) return null;
-  return {
-    type: ThreadType.Group,
-    threadId: candidate.threadId ?? groupId,
-    isSelf: Boolean(candidate.isSelf),
-    data,
-    __catchup: true,
-  };
-}
-
 /** The active 'message' handler, captured so /history can replay messages
  *  through the exact same pipeline AND await each one (guaranteeing order,
  *  which `listener.emit` cannot since the handler is async and not awaited). */
@@ -722,43 +710,17 @@ export async function replayHistoryMessages(messages: ZaloMessage[], gapMs = 250
   return processed;
 }
 
-async function catchUpMissedGroupMessages(
-  api: ZaloAPI,
-  handleZaloMessage: (msg: HistoricalZaloMessage) => Promise<void>,
-): Promise<void> {
-  // Zalo does not replay websocket events that arrive while the bridge is
-  // restarting. After listener startup, scan a tiny history window and forward
-  // only messages that are not already in msgStore. This makes restarts safe.
-  const groups = store.all().filter(e => e.type === 1);
-  let forwarded = 0;
-  for (const entry of groups) {
-    try {
-      const history = await api.getGroupChatHistory(entry.zaloId, 5) as { groupMsgs?: unknown[] };
-      const msgs = (history.groupMsgs ?? [])
-        .map(raw => normalizeHistoryMessage(raw, entry.zaloId))
-        .filter((m): m is HistoricalZaloMessage => m !== null)
-        .sort((a, b) => Number(a.data.ts || 0) - Number(b.data.ts || 0));
-      for (const msg of msgs) {
-        const ids = [msg.data.msgId, msg.data.realMsgId, msg.data.cliMsgId]
-          .filter((id): id is string => typeof id === 'string' && id.length > 0 && id !== '0');
-        if (ids.some(id => msgStore.getTgMsgId(id) !== undefined)) continue;
+const _groupHistoryCoordinator = new GroupHistoryCoordinator();
+let _automaticHistoryReplay = Promise.resolve();
 
-        // Only catch up recent missed messages. Old group history is intentionally
-        // ignored to avoid flooding Telegram on first install/reconfigure.
-        const ts = Number(msg.data.ts || 0);
-        if (ts > 0 && Date.now() - ts > 15 * 60_000) continue;
+/** Fetch one group's history through the live WebSocket old_messages protocol. */
+export function requestGroupHistory(api: ZaloAPI, groupId: string, count: number): Promise<ZaloMessage[]> {
+  return _groupHistoryCoordinator.request(api, groupId, count);
+}
 
-        console.log(`[Zalo→TG] Catch-up missed message group=${entry.zaloId} msgId=${msg.data.msgId}`);
-        await handleZaloMessage(msg);
-        forwarded++;
-      }
-      // Small delay keeps the startup scan gentle across many groups.
-      await new Promise(r => setTimeout(r, 100));
-    } catch (err) {
-      console.warn(`[Zalo→TG] Catch-up failed for group ${entry.zaloId}:`, err instanceof Error ? err.message : err);
-    }
-  }
-  if (forwarded > 0) console.log(`[Zalo→TG] Catch-up forwarded ${forwarded} missed message(s)`);
+/** Reject a pending manual history request when its listener disconnects. */
+export function cancelGroupHistoryRequest(api: ZaloAPI): void {
+  _groupHistoryCoordinator.cancel(api);
 }
 
 
@@ -1929,17 +1891,26 @@ ${html}`
   _activeMessageHandler = handleZaloMessage;
   api.listener.on('message', handleZaloMessage);
 
-  void catchUpMissedGroupMessages(api, handleZaloMessage);
-
   // Catch-up stream from zca-js after reconnect.
-  // Replays recent messages through the same main handler to refill bridges.
-  api.listener.on('old_messages', (messages: ZaloMessage[]) => {
-    if (!Array.isArray(messages) || messages.length === 0) return;
-    const sorted = [...messages].sort((a, b) => Number(a?.data?.ts ?? 0) - Number(b?.data?.ts ?? 0));
-    console.log(`[Zalo→TG] Catch-up old_messages: replay ${sorted.length} item(s)`);
-    for (const oldMsg of sorted) {
-      api.listener.emit('message', oldMsg);
+  // The old HTTP /api/group/history endpoint now returns 404; both automatic
+  // catch-up and manual /history use this working WebSocket stream instead.
+  api.listener.on('old_messages', (messages: ZaloMessage[], oldType: ThreadType) => {
+    if (!Array.isArray(messages)) return;
+    if (_groupHistoryCoordinator.consume(api, messages, oldType)) return;
+    if (messages.length === 0) return;
+    const recent = selectRecentHistory(messages, Date.now(), config.zalo.catchupWindowMs)
+      .map(message => Object.assign(message, { __catchup: true as const }));
+    if (recent.length === 0) {
+      console.log(`[Zalo→TG] Catch-up old_messages: no recent timestamped item(s) in ${messages.length} received`);
+      return;
     }
+    console.log(`[Zalo→TG] Catch-up old_messages: replay ${recent.length}/${messages.length} recent item(s)`);
+    // Preserve ordering across separate User/Group history events and avoid
+    // concurrent processing races in the shared message pipeline.
+    _automaticHistoryReplay = _automaticHistoryReplay
+      .then(() => replayHistoryMessages(recent, 0))
+      .then(() => undefined)
+      .catch(err => console.warn('[Zalo→TG] Catch-up replay failed:', err));
   });
 
   // ── Undo (thu hồi tin nhắn) ────────────────────────────────────────────────

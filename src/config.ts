@@ -55,6 +55,8 @@ export const config = {
      */
     startupMemberPreloadMax: envInt('ZALO_STARTUP_MEMBER_PRELOAD_MAX', 12),
     startupMemberPreloadDelayMs: envInt('ZALO_STARTUP_MEMBER_PRELOAD_DELAY_MS', 5_000),
+    /** Automatic websocket catch-up window. Timestamp-less history is skipped. */
+    catchupWindowMs: envInt('ZALO_CATCHUP_WINDOW_MS', 12 * 60 * 60_000),
   },
   dataDir: resolvePath(process.env.DATA_DIR, 'data'),
 } as const;
