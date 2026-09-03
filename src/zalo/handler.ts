@@ -338,8 +338,10 @@ async function isMutedOnZalo(api: ZaloAPI, threadId: string, type: 0 | 1): Promi
  * Telegram topic. Never throws — board mirroring must not break the main
  * message pipeline. Creates the topic on demand so board knowledge is never
  * lost even for groups without prior messages.
+ * Returns the sent Telegram message_id for callers that need follow-up
+ * actions (e.g. pinning), or undefined when the send failed.
  */
-async function mirrorBoardItemToTopic(api: ZaloAPI, groupId: string, html: string): Promise<void> {
+async function mirrorBoardItemToTopic(api: ZaloAPI, groupId: string, html: string): Promise<number | undefined> {
   try {
     let topicId = store.getTopicByZalo(groupId, 1 /* Group */);
     if (topicId === undefined) {
@@ -347,14 +349,49 @@ async function mirrorBoardItemToTopic(api: ZaloAPI, groupId: string, html: strin
       topicId = await getOrCreateTopic(groupId, 1, info.name || groupId, info.avt);
     }
     const silent = await isMutedOnZalo(api, groupId, 1);
-    await tg.sendMessage(config.telegram.groupId, html, {
+    const sent = await tg.sendMessage(config.telegram.groupId, html, {
       message_thread_id: topicId,
       parse_mode: 'HTML',
       ...(silent ? { disable_notification: true } : {}),
     });
     console.log(`[ZaloHandler] Mirrored board item to TG topic group=${groupId} topicId=${topicId}`);
+    return sent.message_id;
   } catch (err) {
     console.warn(`[ZaloHandler] Failed to mirror board item for group ${groupId}:`, err instanceof Error ? err.message : err);
+    return undefined;
+  }
+}
+
+// Zalo pin-topic id → Telegram mirror message_id, so unpin_topic on Zalo can
+// unpin the matching Telegram message. In-memory only: pins created before a
+// restart simply keep their notification message without auto-unpin.
+const _zaloPinToTgMsg = new Map<string, number>();
+
+/** Pin the mirror message for a Zalo pin event; records the mapping for later unpin. */
+async function pinBoardMirrorMessage(groupId: string, zaloPinId: string, tgMsgId: number): Promise<void> {
+  try {
+    await tg.pinChatMessage(config.telegram.groupId, tgMsgId, { disable_notification: true });
+    if (zaloPinId) _zaloPinToTgMsg.set(`${groupId}|${zaloPinId}`, tgMsgId);
+    console.log(`[ZaloHandler] Pinned board mirror group=${groupId} pinId=${zaloPinId} tgMsgId=${tgMsgId}`);
+  } catch (err) {
+    console.warn(`[ZaloHandler] Failed to pin board mirror group=${groupId}:`, err instanceof Error ? err.message : err);
+  }
+}
+
+/** Unpin the Telegram mirror message matching a Zalo unpin event. */
+async function unpinBoardMirrorMessage(groupId: string, zaloPinId: string): Promise<void> {
+  const key = `${groupId}|${zaloPinId}`;
+  const tgMsgId = _zaloPinToTgMsg.get(key);
+  if (tgMsgId === undefined) {
+    console.log(`[ZaloHandler] Unpin: no TG mapping for group=${groupId} pinId=${zaloPinId} (pre-restart pin?)`);
+    return;
+  }
+  try {
+    await tg.unpinChatMessage(config.telegram.groupId, tgMsgId);
+    _zaloPinToTgMsg.delete(key);
+    console.log(`[ZaloHandler] Unpinned board mirror group=${groupId} pinId=${zaloPinId} tgMsgId=${tgMsgId}`);
+  } catch (err) {
+    console.warn(`[ZaloHandler] Failed to unpin board mirror group=${groupId}:`, err instanceof Error ? err.message : err);
   }
 }
 
@@ -2393,25 +2430,40 @@ ${html}`
       }
 
       // ── Pin / unpin topic: mirror into the TG topic (read-only) ───────────
+      // Zalo only pins on explicit pin events — notes/reminders are NOT pins.
+      // Follow Zalo exactly: pin the TG mirror on pin events, unpin on unpin.
       if (type === 'new_pin_topic' || type === 'update_pin_topic' || type === 'unpin_topic') {
         const pinTopic = (data as { topic?: unknown } | undefined)?.topic as
           { type?: unknown; params?: unknown; id?: unknown; creatorId?: unknown } | undefined;
+        const pinId = typeof pinTopic?.id === 'string' ? pinTopic.id.trim() : '';
+        if (type === 'unpin_topic') {
+          const dedupeKey = boardMirrorDedupeKey([groupId, type, pinId]);
+          if (!boardMirrorSeen(dedupeKey) && pinId) {
+            await unpinBoardMirrorMessage(groupId, pinId);
+          }
+          return;
+        }
         const pinItem = extractBoardMirror(pinTopic);
         if (pinItem) {
-          const dedupeKey = boardMirrorDedupeKey([groupId, type, pinItem.kind, pinItem.id, pinItem.title]);
+          const dedupeKey = boardMirrorDedupeKey([groupId, type, pinItem.kind, pinItem.id || pinId, pinItem.title]);
           if (!boardMirrorSeen(dedupeKey)) {
             const rawActor = (data as { actorId?: unknown } | undefined)?.actorId;
             const actorId = typeof rawActor === 'string' ? rawActor.trim() : '';
-            await mirrorBoardItemToTopic(api, groupId, buildBoardMirrorText(pinItem, {
+            const sentId = await mirrorBoardItemToTopic(api, groupId, buildBoardMirrorText(pinItem, {
               actorName: actorId,
-              removed: type === 'unpin_topic',
+              removed: false,
             }));
+            if (sentId !== undefined) {
+              await pinBoardMirrorMessage(groupId, pinItem.id || pinId, sentId);
+            }
           }
         } else {
-          const dedupeKey = boardMirrorDedupeKey([groupId, type, String((pinTopic as { id?: unknown } | undefined)?.id ?? '')]);
+          const dedupeKey = boardMirrorDedupeKey([groupId, type, pinId]);
           if (!boardMirrorSeen(dedupeKey)) {
-            const verb = type === 'unpin_topic' ? 'đã gỡ ghim' : 'đã ghim';
-            await mirrorBoardItemToTopic(api, groupId, `<i>📌 Một nội dung ${verb} trên Zalo</i>`);
+            const sentId = await mirrorBoardItemToTopic(api, groupId, `<i>📌 Một nội dung đã ghim trên Zalo</i>`);
+            if (sentId !== undefined) {
+              await pinBoardMirrorMessage(groupId, pinId, sentId);
+            }
           }
         }
         return;
