@@ -2140,6 +2140,11 @@ export function setupTelegramHandler(
         await ctx.answerCbQuery('❌ Không tìm thấy bình chọn.');
         return;
       }
+      if (config.zalo.observeOnlyGroupIds.has(entry.zaloGroupId)) {
+        await ctx.answerCbQuery('🔒 Topic chỉ quan sát — không gửi thao tác sang Zalo.').catch(() => undefined);
+        console.warn(`[TG→Zalo] Blocked lock_poll for observe-only group ${entry.zaloGroupId}`);
+        return;
+      }
       try {
         await doLockPoll(entry, currentApi);
         await ctx.answerCbQuery('✅ Đã khoá bình chọn');
@@ -3938,6 +3943,10 @@ export function setupTelegramHandler(
       if (!poll.is_closed) return;
       const entry = pollStore.getByTgPollUUID(poll.id);
       if (!entry || !currentApi) return;
+      if (config.zalo.observeOnlyGroupIds.has(entry.zaloGroupId)) {
+        console.warn(`[TG→Zalo] Blocked poll lock for observe-only group ${entry.zaloGroupId}`);
+        return;
+      }
       await doLockPoll(entry, currentApi);
     } catch (err) {
       console.error('[TG→Zalo] lockPoll error:', err);
@@ -3962,6 +3971,10 @@ export function setupTelegramHandler(
       const entry = pollStore.getByTgPollUUID(tgPollUUID);
       if (!entry) {
         console.log('[TG→Zalo] poll_answer: unknown poll UUID', tgPollUUID);
+        return;
+      }
+      if (config.zalo.observeOnlyGroupIds.has(entry.zaloGroupId)) {
+        console.warn(`[TG→Zalo] Blocked poll_answer for observe-only group ${entry.zaloGroupId}`);
         return;
       }
 

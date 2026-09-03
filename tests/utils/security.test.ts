@@ -36,7 +36,9 @@ describe('safe URL rendering', () => {
 });
 
 describe('atomic private JSON writes', () => {
-  it('writes valid JSON with owner-only permissions and replaces existing data', () => {
+  // Windows không hỗ trợ Unix permission bits (chmod 0o600 luôn đọc về 0o666),
+  // chỉ chạy assertion này trên POSIX.
+  it.runIf(process.platform !== 'win32')('writes valid JSON with owner-only permissions and replaces existing data', () => {
     mkdirSync(testRoot, { recursive: true });
     const file = path.join(testRoot, 'credentials.json');
     writeFileSync(file, '{"old":true}', { mode: 0o644 });
