@@ -377,6 +377,9 @@ DATA_DIR=./data
 # Skip forwarding messages from muted Zalo groups.
 # Accepted truthy values: true, 1, yes, on
 ZALO_SKIP_MUTED_GROUPS=false
+
+# Never forward or create topics for these Zalo group IDs (comma-separated).
+ZALO_IGNORED_GROUP_IDS=5973548710291896378
 ```
 
 ### Configuration Reference
@@ -387,6 +390,7 @@ ZALO_SKIP_MUTED_GROUPS=false
 | `TG_GROUP_ID` | ✅ | — | Target Telegram supergroup ID with Forum Topics enabled. |
 | `DATA_DIR` | ❌ | `./data` | Directory used for persistent bridge state. |
 | `ZALO_SKIP_MUTED_GROUPS` | ❌ | `false` | Skips forwarding from muted Zalo groups when enabled. |
+| `ZALO_IGNORED_GROUP_IDS` | ❌ | empty | Comma-separated Zalo group IDs that are completely excluded from the Telegram bridge. |
 | `LOCAL_BOT_API` | ❌ | `0` | Enables local Telegram Bot API mode when set to `1`. |
 | `TG_LOCAL_SERVER` | Conditional | — | Local Bot API base URL. |
 | `TG_API_ID` | Conditional | — | Telegram application API ID for local Bot API setup. |
@@ -726,5 +730,4 @@ Thanks to everyone who has contributed to this project.
 Contributions are welcome. Bug fixes, documentation improvements, architectural refinements, compatibility patches, and feature proposals can be submitted through pull requests.
 
 To be listed as a contributor, submit a meaningful contribution through a pull request that is reviewed and merged into the project.
-
 

@@ -30,6 +30,12 @@ function envInt(key: string, defaultValue: number): number {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : defaultValue;
 }
 
+function envIdSet(key: string): ReadonlySet<string> {
+  const raw = process.env[key];
+  if (!raw) return new Set();
+  return new Set(raw.split(',').map(value => value.trim()).filter(Boolean));
+}
+
 export const config = {
   telegram: {
     token:       requireEnv('TG_TOKEN'),
@@ -44,6 +50,10 @@ export const config = {
   zalo: {
     credentialsPath: resolvePath(process.env.ZALO_CREDENTIALS_PATH, 'credentials.json'),
     skipMutedGroups: envFlag('ZALO_SKIP_MUTED_GROUPS'),
+    /** Zalo group IDs that must never be forwarded or create Telegram topics. */
+    ignoredGroupIds: envIdSet('ZALO_IGNORED_GROUP_IDS'),
+    /** Zalo groups mirrored to Telegram for observation, with all TG→Zalo writes blocked. */
+    observeOnlyGroupIds: envIdSet('ZALO_OBSERVE_ONLY_GROUP_IDS'),
     // Mirror Zalo's "mute notifications" → deliver those threads silently on
     // Telegram (messages still arrive, just no ping). On by default; set
     // ZALO_MUTE_SILENT=0 to always notify.
@@ -57,6 +67,16 @@ export const config = {
     startupMemberPreloadDelayMs: envInt('ZALO_STARTUP_MEMBER_PRELOAD_DELAY_MS', 5_000),
     /** Automatic websocket catch-up window. Timestamp-less history is skipped. */
     catchupWindowMs: envInt('ZALO_CATCHUP_WINDOW_MS', 12 * 60 * 60_000),
+  },
+  openClawGroupReply: {
+    enabled: envFlag('OPENCLAW_GROUP_REPLY_ENABLED'),
+    groupIds: envIdSet('OPENCLAW_GROUP_REPLY_GROUP_IDS'),
+    agentId: process.env.OPENCLAW_GROUP_REPLY_AGENT_ID?.trim() || 'zalo-12c4',
+    model: process.env.OPENCLAW_GROUP_REPLY_MODEL?.trim() || undefined,
+    nodeBinary: process.env.OPENCLAW_NODE_BINARY?.trim() || process.execPath,
+    cliScript: process.env.OPENCLAW_CLI_SCRIPT?.trim() || 'openclaw',
+    timeoutSeconds: envInt('OPENCLAW_GROUP_REPLY_TIMEOUT_SECONDS', 90),
+    ownerActiveMs: envInt('OPENCLAW_GROUP_REPLY_OWNER_ACTIVE_MS', 10 * 60_000),
   },
   dataDir: resolvePath(process.env.DATA_DIR, 'data'),
 } as const;

@@ -132,7 +132,10 @@ export function applyZaloMarkupHtml(
 
 const SENDER_BADGES = ['🟦', '🟩', '🟪', '🟧', '🟥', '🟨', '🔵', '🟢', '🟣', '🟠', '🔴', '🟡', '🔷', '🔶', '🔹', '🔸', '⬛', '⬜', '🟤'] as const;
 const SENDER_ACCENTS = ['▌', '●', '◆', '■', '▲', '✦', '✚', '⬢'] as const;
-const SENDER_FOOTER_PREFIX = '└ ';
+// Keep attribution visually detached from the message body. All bridged
+// messages share one Telegram bot avatar, so a blank line + explicit person
+// icon is easier to scan than a compact footer stuck directly to the content.
+const SENDER_FOOTER_PREFIX = '└── 👤 ';
 
 function stableHash(text: string): number {
   let hash = 2166136261;
@@ -175,16 +178,17 @@ export function senderLabel(senderName: string, stableKey?: string): string {
 
 function senderHeader(senderName: string, stableKey?: string): string {
   const displayName = truncate(senderName, 64);
-  return `${SENDER_FOOTER_PREFIX}${escapeHtml(senderMarker(senderName, stableKey))} ${escapeHtml(displayName)}`;
+  return `${SENDER_FOOTER_PREFIX}${escapeHtml(senderMarker(senderName, stableKey))}  ${escapeHtml(displayName)}`;
 }
 
 /**
- * Format a group message with the content first and sender attribution below:
+ * Format a group message with the content first and a detached sender tag:
  *   content…
- *   └ 🟪◆ SenderName
+ *
+ *   └── 👤 🟪◆  SenderName
  */
 export function formatGroupMsg(senderName: string, content: string, stableKey?: string): string {
-  return `${escapeHtml(truncate(content))}\n${senderHeader(senderName, stableKey)}`;
+  return `${escapeHtml(truncate(content))}\n\n${senderHeader(senderName, stableKey)}`;
 }
 
 /**
@@ -192,7 +196,7 @@ export function formatGroupMsg(senderName: string, content: string, stableKey?: 
  * have already been wrapped in <b> tags).
  */
 export function formatGroupMsgHtml(senderName: string, bodyHtml: string, stableKey?: string): string {
-  return `${bodyHtml}\n${senderHeader(senderName, stableKey)}`;
+  return `${bodyHtml}\n\n${senderHeader(senderName, stableKey)}`;
 }
 
 /** Sender attribution used as the final line of media captions. */

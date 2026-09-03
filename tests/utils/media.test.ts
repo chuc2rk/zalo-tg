@@ -72,6 +72,10 @@ describe('forwarded bridge media captions', () => {
     expect(stripped).toEqual({ text: 'Nội dung cần gửi', stripped: true });
   });
 
+  it('recognizes the detached person footer as bridge sender metadata', () => {
+    expect(__test_isSenderOnlyForwardCaption('└── 👤 🟪◆  BẠN', undefined)).toBe(true);
+  });
+
   it('keeps normal multi-line text intact', () => {
     const kept = __test_stripBridgeForwardedTextHeader('Bạn ơi\n━━━━━━━━\nkhông phải header bridge');
     expect(kept).toEqual({ text: 'Bạn ơi\n━━━━━━━━\nkhông phải header bridge', stripped: false });

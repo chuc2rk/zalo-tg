@@ -15,6 +15,7 @@ function normalizeSenderOnlyCaption(text: string): string {
     .replace(/&lt;/gi, '<')
     .replace(/&gt;/gi, '>')
     .replace(/^@chuc2rk\s*/i, '')
+    .replace(/^└[─—-]*\s*/u, '')
     .replace(/^👤\s*/, '')
     .replace(/^[🔵🟢🟣🟠🔴🟡⚫⚪🟤🔷🔶🔹🔸🟦🟩🟪🟧🟥🟨⬛⬜][▌●◆■▲✦✚⬢]?\s*/u, '')
     .replace(/^━+\s*/u, '')
@@ -457,6 +458,32 @@ export function setupTelegramHandler(
 
   /** Exposed setter so index.ts can inject the auto-logged-in API. */
   const setCurrentApi = (api: ZaloAPI) => { currentApi = api; };
+
+  // Observe-only topics are a one-way mirror. Block commands, messages and
+  // inline-button actions before any TG→Zalo handler can mutate the group.
+  // Read-only history/info commands remain available for context collection.
+  tgBot.use(async (ctx, next) => {
+    if (ctx.chat?.id !== config.telegram.groupId) return next();
+    const message = ctx.message;
+    const callbackMessage = 'callbackQuery' in ctx && ctx.callbackQuery && 'message' in ctx.callbackQuery
+      ? ctx.callbackQuery.message
+      : undefined;
+    const topicId = (message && 'message_thread_id' in message ? message.message_thread_id : undefined)
+      ?? (callbackMessage && 'message_thread_id' in callbackMessage ? callbackMessage.message_thread_id : undefined);
+    if (!topicId) return next();
+    const entry = store.getEntryByTopic(topicId);
+    if (!entry || entry.type !== 1 || !config.zalo.observeOnlyGroupIds.has(entry.zaloId)) return next();
+
+    const text = message && 'text' in message ? message.text : undefined;
+    if (typeof text === 'string' && /^\/(?:history|group_info(?:all)?)(?:@\w+)?(?:\s|$)/i.test(text)) {
+      return next();
+    }
+    if ('callbackQuery' in ctx && ctx.callbackQuery) {
+      await ctx.answerCbQuery('🔒 Topic chỉ quan sát — không gửi thao tác sang Zalo.').catch(() => undefined);
+    }
+    console.warn(`[TG→Zalo] Blocked observe-only topic action group=${entry.zaloId} topicId=${topicId}`);
+    return;
+  });
 
   tgBot.command('login', async (ctx) => {
     const isPrivate   = ctx.chat.type === 'private';
@@ -2588,6 +2615,15 @@ export function setupTelegramHandler(
         ?? 0,
       );
 
+      const reactionQuote = msgStore.getQuote(tgMsgId);
+      const reactionSent = sentMsgStore.get(tgMsgId);
+      const reactionZaloId = reactionQuote?.zaloId ?? reactionSent?.zaloId;
+      const reactionThreadType = reactionQuote?.threadType ?? reactionSent?.threadType;
+      if (reactionThreadType === 1 && reactionZaloId && config.zalo.observeOnlyGroupIds.has(reactionZaloId)) {
+        console.warn(`[TG→Zalo] Blocked reaction/recall for observe-only group ${reactionZaloId}`);
+        return;
+      }
+
       // ── Recall shortcut: react 🙈 to undo a message (no command needed) ──────
       // Telegram never tells bots when a message is *deleted*, so a plain
       // right-click → Delete can't be mirrored. Reacting with a dedicated emoji
@@ -2838,6 +2874,11 @@ export function setupTelegramHandler(
       const entry = store.getEntryByTopic(topicId);
       if (!entry) {
         console.warn(`[TG→Zalo] No Zalo mapping for topicId=${topicId}`);
+        return;
+      }
+
+      if (entry.type === 1 && config.zalo.observeOnlyGroupIds.has(entry.zaloId)) {
+        console.warn(`[TG→Zalo] Blocked observe-only group ${entry.zaloId} (topicId=${topicId})`);
         return;
       }
 

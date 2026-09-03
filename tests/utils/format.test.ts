@@ -123,8 +123,8 @@ describe('sender scan marker', () => {
 });
 
 describe('formatGroupMsg', () => {
-  it('formats content first, then separator and sender attribution', () => {
-    expect(formatGroupMsg('Alice', 'Hello', 'uid-a')).toMatch(/^Hello\n└ \S+ Alice$/u);
+  it('visually detaches content from an explicit sender attribution', () => {
+    expect(formatGroupMsg('Alice', 'Hello', 'uid-a')).toMatch(/^Hello\n\n└── 👤 \S+  Alice$/u);
   });
 
   it('escapes sender name and content', () => {
@@ -144,14 +144,14 @@ describe('formatGroupMsg', () => {
 });
 
 describe('formatGroupMsgHtml', () => {
-  it('keeps pre-escaped body first and puts the plain sender below', () => {
-    expect(formatGroupMsgHtml('Alice', '<b>Hello</b>', 'uid-a')).toMatch(/^<b>Hello<\/b>\n└ \S+ Alice$/u);
+  it('keeps pre-escaped body first and puts the detached plain sender below', () => {
+    expect(formatGroupMsgHtml('Alice', '<b>Hello</b>', 'uid-a')).toMatch(/^<b>Hello<\/b>\n\n└── 👤 \S+  Alice$/u);
   });
 });
 
 describe('groupCaption', () => {
-  it('returns sender marker plus plain sender name', () => {
-    expect(groupCaption('Alice', 'uid-a')).toMatch(/^└ \S+ Alice$/u);
+  it('returns an explicit person tag, sender marker, and plain sender name', () => {
+    expect(groupCaption('Alice', 'uid-a')).toMatch(/^└── 👤 \S+  Alice$/u);
   });
 
   it('preserves Vietnamese sender-name casing for media captions', () => {

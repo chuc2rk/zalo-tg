@@ -1,7 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { sentMsgStore } from '../../src/store.js';
 
 describe('sentMsgStore concurrent send suppression', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('keeps isSendingTo true until all concurrent sends to the same Zalo conversation finish', () => {
     const zaloId = `test-concurrent-${Date.now()}`;
 
@@ -19,6 +23,19 @@ describe('sentMsgStore concurrent send suppression', () => {
     sentMsgStore.unmarkSending(zaloId);
 
     expect(sentMsgStore._testPendingCount(zaloId)).toBe(0);
+    expect(sentMsgStore.isSendingTo(zaloId)).toBe(false);
+  });
+
+  it('keeps slow file-upload echo suppression active beyond the old five-second window', () => {
+    vi.useFakeTimers();
+    const zaloId = `test-slow-upload-${Date.now()}`;
+
+    sentMsgStore.markSending(zaloId);
+    vi.advanceTimersByTime(6_000);
+
+    expect(sentMsgStore.isSendingTo(zaloId)).toBe(true);
+
+    sentMsgStore.unmarkSending(zaloId);
     expect(sentMsgStore.isSendingTo(zaloId)).toBe(false);
   });
 

@@ -150,7 +150,12 @@ export interface ZaloQuoteData {
   threadType: 0 | 1;
 }
 
-const MSG_CACHE_MAX = 10000;
+// Keep enough history for replies to older file/media messages. Each Zalo
+// message commonly consumes two IDs (global + cli), so the old 10k ceiling
+// retained only about 5k Telegram messages and could evict a file quote within
+// the same workday on busy accounts. The compact gzip store is small enough for
+// a 50k ceiling while still remaining bounded.
+const MSG_CACHE_MAX = 50000;
 
 // ── Persistence helpers for msgStore ─────────────────────────────────────────
 //
@@ -257,6 +262,7 @@ function _flushMsgPersist(): void {
         qt.ttl,
         _idx(qt.zaloId),
         qt.threadType,
+        qt.propertyExt,
       ]);
     }
 
@@ -334,7 +340,15 @@ export const msgStore = {
   save(tgMsgId: number, zaloMsgIds: string[], quote: ZaloQuoteData): void {
     // Drop sentinel "0" and empty IDs — they are realMsgId=0 placeholders,
     // nobody ever queries getTgMsgId("0") so storing them is pure waste.
-    const validIds = zaloMsgIds.filter(id => id && id !== '0');
+    // Always include IDs carried by quote metadata too. Most callers already
+    // pass msgId/realMsgId/cliMsgId explicitly, but making the store enforce the
+    // aliases prevents Zalo→Telegram replies from losing their Telegram target
+    // after a restart when a caller supplies only the primary/global ID.
+    const validIds = Array.from(new Set([
+      ...zaloMsgIds,
+      quote.msgId,
+      quote.cliMsgId,
+    ].map(String).filter(id => id && id !== '0')));
     while (_msgKeyOrder.length + validIds.length > MSG_CACHE_MAX) _evictOne();
     for (const id of validIds) {
       if (!_zaloToTg.has(id)) {
@@ -1173,16 +1187,24 @@ export const sentMsgStore = {
   },
 
   /**
-   * Returns true if the bot is currently sending to this zaloId.
-   * Used to suppress isSelf echo in the Zalo listener.
-   * The echo handler in zalo/handler.ts now skips all isSelf messages
-   * unconditionally, so the primary echo suppression no longer depends
-   * on this window. Reduced from 15s to 5s to minimise false suppression
-   * of genuine messages arriving from other devices.
+   * Returns true while at least one TG→Zalo send is still in flight.
+   *
+   * Do not expire this flag after a short fixed window. File uploads commonly
+   * take longer than five seconds, and Zalo can emit the self-echo before the
+   * upload/send promise returns a msgId. Expiring early makes that echo look like
+   * a genuine message sent from another Zalo device, so the bridge forwards the
+   * same file back to Telegram a second time. Every send path already releases
+   * the ref-count in a finally block; keep only a generous stale guard for a
+   * truly abandoned operation.
    */
   isSendingTo(zaloId: string): boolean {
     const pending = _pendingSendConvos.get(zaloId);
-    return pending !== undefined && pending.count > 0 && Date.now() - pending.since < 5_000;
+    if (!pending || pending.count <= 0) return false;
+    const PENDING_SEND_STALE_MS = 35 * 60_000;
+    if (Date.now() - pending.since <= PENDING_SEND_STALE_MS) return true;
+    console.warn(`[sentMsgStore] Clearing stale pending send for zaloId=${zaloId} count=${pending.count}`);
+    _pendingSendConvos.delete(zaloId);
+    return false;
   },
 
   stats(): { entries: number } {

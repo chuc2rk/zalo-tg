@@ -17,6 +17,7 @@ import type { ZaloStyle } from '../utils/format.js';
 import { msgStore, userCache, pollStore, sentMsgStore, zaloAlbumStore, reactionEchoStore, reactionEventDedupeStore, aliasCache, friendsCache, nameCache, recentlyRecalledMsgIds, markRecallConfirmed, type ZaloQuoteData } from '../store.js';
 import { tgQueue } from '../utils/tgQueue.js';
 import { maybeAutoReply } from './autoReply.js';
+import { maybeOpenClawGroupReply } from './openclawGroupReply.js';
 import { GroupHistoryCoordinator, selectRecentHistory } from './history.js';
 
 // Proxy that routes every tg.* call through the rate-limit queue
@@ -306,6 +307,10 @@ async function getMutedZaloIds(api: ZaloAPI): Promise<{ groups: Set<string>; pee
 async function isMutedZaloGroup(api: ZaloAPI, groupId: string): Promise<boolean> {
   if (!config.zalo.skipMutedGroups) return false;
   return (await getMutedZaloIds(api)).groups.has(groupId);
+}
+
+function isIgnoredZaloGroup(groupId: string): boolean {
+  return config.zalo.ignoredGroupIds.has(groupId);
 }
 
 /**
@@ -725,6 +730,21 @@ export function cancelGroupHistoryRequest(api: ZaloAPI): void {
 
 
 export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
+  // Archive and unlink any topics that became explicitly ignored. Removing the
+  // mapping prevents later maintenance events from touching the old topic; the
+  // inbound guard below prevents it from ever being recreated.
+  for (const entry of store.all()) {
+    if (entry.type !== ThreadType.Group || !isIgnoredZaloGroup(entry.zaloId)) continue;
+    await tg.closeForumTopic(config.telegram.groupId, entry.topicId).catch(err => {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!msg.includes('TOPIC_CLOSED')) {
+        console.warn(`[Zalo→TG] Could not archive ignored topic ${entry.topicId}: ${msg}`);
+      }
+    });
+    store.remove(entry.topicId);
+    console.log(`[Zalo→TG] Archived and unlinked ignored group ${entry.zaloId} (topicId=${entry.topicId})`);
+  }
+
   // Warm only a small slice of existing group topics on startup. Older code
   // tried to preload every mapped group and marked all of them as loaded before
   // the API calls actually succeeded; accounts in many large groups could hit
@@ -859,6 +879,15 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
           console.log(`[Zalo→TG] Skip echo self message (${selfMsgIds.join(', ')})`);
           return;
         }
+
+        // Real self message from the Zalo app: notify the group-reply gate before
+        // normal bridge processing so it can pause AI replies while Chức is active.
+        if (!('__catchup' in msg) && (msg.data.msgType ?? ZALO_MSG_TYPES.TEXT) === ZALO_MSG_TYPES.TEXT) {
+          const { text: selfText } = parseContent(msg.data.content);
+          if (selfText) {
+            void maybeOpenClawGroupReply({ api, msg, text: selfText, senderName: 'Chức' });
+          }
+        }
         // Real self message from Zalo app — fall through and forward to Telegram
       }
 
@@ -884,6 +913,25 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
       const senderName = msg.isSelf ? 'Bạn' : (msg.data.dName ?? msg.data.uidFrom);
       const msgType    = msg.data.msgType ?? ZALO_MSG_TYPES.TEXT;
 
+      if (type === ThreadType.Group && isIgnoredZaloGroup(zaloId)) {
+        // Ignored groups must never be mirrored to Telegram or create topics.
+        // Exception: the OpenClaw group-reply pilot may listen/respond inside
+        // explicitly configured ignored groups, still returning before any TG work.
+        if (!msg.isSelf && !('__catchup' in msg) && msgType === ZALO_MSG_TYPES.TEXT) {
+          const { text: ignoredGroupText } = parseContent(msg.data.content);
+          if (ignoredGroupText) {
+            void maybeOpenClawGroupReply({
+              api,
+              msg,
+              text: ignoredGroupText,
+              senderName,
+            });
+          }
+        }
+        console.log(`[Zalo→TG] Skip ignored group ${zaloId}`);
+        return;
+      }
+
       if (type === ThreadType.Group && await isMutedZaloGroup(api, zaloId)) {
         console.log(`[Zalo→TG] Skip muted group ${zaloId}`);
         return;
@@ -908,6 +956,17 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
 
       // Parse content early so we can start media download in parallel with topic resolution
       const { text, media } = parseContent(msg.data.content);
+
+      // Experimental AI reply path, hard-scoped to configured test groups.
+      // The helper itself enforces self-message pause and direct @/reply gates.
+      if (!msg.isSelf && !('__catchup' in msg) && msgType === ZALO_MSG_TYPES.TEXT && text) {
+        void maybeOpenClawGroupReply({
+          api,
+          msg,
+          text,
+          senderName,
+        });
+      }
 
       // Determine media URL eagerly (before topic lookup) so download starts immediately
       const _eagerMediaUrl = (() => {
@@ -1019,7 +1078,7 @@ ${html}`
       const senderCaption = groupCaption(bridgeSenderName, senderUid);
       const appendSenderFooter = (bodyHtml?: string): string => withDmMention(
         bodyHtml
-          ? `${bodyHtml}\n${senderCaption}`
+          ? `${bodyHtml}\n\n${senderCaption}`
           : senderCaption,
       );
       const caption = appendSenderFooter();
@@ -1918,6 +1977,8 @@ ${html}`
   api.listener.on('undo', async (undo: any) => {
     try {
       const data = undo?.data;
+      const undoZaloId = String(undo?.threadId ?? data?.idTo ?? '');
+      if (undo?.isGroup && isIgnoredZaloGroup(undoZaloId)) return;
       // The recalled Zalo message ID.
       // Group chat: content.globalMsgId is set.
       // Personal chat: globalMsgId=0, realMsgId="0", but content.cliMsgId is the cliMsgId
@@ -2050,6 +2111,7 @@ ${html}`
 
       const zaloId = String(reaction?.threadId ?? data?.idTo ?? "");
       if (!zaloId) return;
+      if (reaction?.isGroup && isIgnoredZaloGroup(zaloId)) return;
 
       const actorUid = typeof data?.uidFrom === 'string' ? data.uidFrom.trim() : '';
       const rawName = typeof data?.dName === 'string' ? data.dName.trim() : '';
@@ -2137,6 +2199,7 @@ ${html}`
       const data    = event?.data;
       const groupId = String(event?.threadId ?? data?.groupId ?? '');
       if (!groupId) return;
+      if (isIgnoredZaloGroup(groupId)) return;
 
       // ── Join request: someone wants to join the group ─────────────────────
       if (type === 'join_request') {
