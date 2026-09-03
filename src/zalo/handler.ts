@@ -19,6 +19,14 @@ import { tgQueue } from '../utils/tgQueue.js';
 import { maybeAutoReply } from './autoReply.js';
 import { maybeOpenClawGroupReply } from './openclawGroupReply.js';
 import { GroupHistoryCoordinator, selectRecentHistory } from './history.js';
+import {
+  boardMirrorDedupeKey,
+  boardMirrorSeen,
+  buildBoardMirrorText,
+  buildReminderMirrorText,
+  extractBoardMirror,
+  extractReminderMirror,
+} from './boardMirror.js';
 
 // Proxy that routes every tg.* call through the rate-limit queue
 // so 429 errors are auto-retried instead of crashing the process.
@@ -322,6 +330,31 @@ async function isMutedOnZalo(api: ZaloAPI, threadId: string, type: 0 | 1): Promi
   if (!config.zalo.muteSilentMirror) return false;
   const { groups, peers } = await getMutedZaloIds(api);
   return type === 1 ? groups.has(threadId) : peers.has(threadId);
+}
+
+/**
+ * Send a read-only board mirror (note / reminder / pin) into the group's
+ * Telegram topic. Never throws — board mirroring must not break the main
+ * message pipeline. Creates the topic on demand so board knowledge is never
+ * lost even for groups without prior messages.
+ */
+async function mirrorBoardItemToTopic(api: ZaloAPI, groupId: string, html: string): Promise<void> {
+  try {
+    let topicId = store.getTopicByZalo(groupId, 1 /* Group */);
+    if (topicId === undefined) {
+      const info = await getCachedGroupInfo(api, groupId);
+      topicId = await getOrCreateTopic(groupId, 1, info.name || groupId, info.avt);
+    }
+    const silent = await isMutedOnZalo(api, groupId, 1);
+    await tg.sendMessage(config.telegram.groupId, html, {
+      message_thread_id: topicId,
+      parse_mode: 'HTML',
+      ...(silent ? { disable_notification: true } : {}),
+    });
+    console.log(`[ZaloHandler] Mirrored board item to TG topic group=${groupId} topicId=${topicId}`);
+  } catch (err) {
+    console.warn(`[ZaloHandler] Failed to mirror board item for group ${groupId}:`, err instanceof Error ? err.message : err);
+  }
 }
 
 // In-flight topic creation promises — prevents duplicate topic creation when
@@ -2301,6 +2334,80 @@ ${html}`
             }
           } else {
             console.log(`[ZaloHandler] update_board pollId=${pollId} not in pollStore (no TG mapping)`);
+          }
+        } else {
+          // ── Board note / pinned message: mirror into the TG topic so group
+          // knowledge survives even if Zalo history is lost (reinstall, etc).
+          // Read-only: never writes back to Zalo.
+          const boardTopic = (data?.groupTopic ?? data?.topic) as
+            { type?: unknown; params?: unknown; id?: unknown; creatorId?: unknown } | undefined;
+          const boardItem = extractBoardMirror(boardTopic);
+          if (boardItem) {
+            const editStamp = (boardTopic as { editTime?: unknown } | undefined)?.editTime ??
+              (boardTopic as { createTime?: unknown } | undefined)?.createTime ?? '';
+            const dedupeKey = boardMirrorDedupeKey([groupId, type, boardItem.kind, boardItem.id, String(editStamp)]);
+            if (boardMirrorSeen(dedupeKey)) {
+              console.log(`[ZaloHandler] Skip duplicate board mirror group=${groupId} kind=${boardItem.kind} id=${boardItem.id}`);
+            } else {
+              const actorName = data?.updateMembers?.[0]?.dName ?? data?.creatorId ?? '';
+              await mirrorBoardItemToTopic(api, groupId, buildBoardMirrorText(boardItem, {
+                actorName,
+                removed: type === 'remove_board',
+              }));
+            }
+          }
+        }
+        return;
+      }
+
+      // ── Reminder created/updated: mirror into the TG topic (read-only) ────
+      if (type === 'remind_topic') {
+        const reminder = extractReminderMirror(data as Record<string, unknown>);
+        if (reminder) {
+          const dedupeKey = boardMirrorDedupeKey([groupId, type, reminder.title, String(reminder.startTime ?? '')]);
+          if (boardMirrorSeen(dedupeKey)) {
+            console.log(`[ZaloHandler] Skip duplicate reminder mirror group=${groupId}`);
+          } else {
+            await mirrorBoardItemToTopic(api, groupId, buildReminderMirrorText(reminder));
+          }
+        }
+        return;
+      }
+
+      // ── Reminder responses: compact count-only mirror (no extra API calls) ─
+      if (type === 'accept_remind' || type === 'reject_remind') {
+        const members = (data as { updateMembers?: unknown } | undefined)?.updateMembers;
+        const count = Array.isArray(members) ? members.length : 0;
+        if (count > 0) {
+          const dedupeKey = boardMirrorDedupeKey([groupId, type, String((data as { topicId?: unknown } | undefined)?.topicId ?? ''), count]);
+          if (!boardMirrorSeen(dedupeKey)) {
+            const verb = type === 'accept_remind' ? 'xác nhận' : 'từ chối';
+            await mirrorBoardItemToTopic(api, groupId, `<i>⏰ ${count} thành viên đã ${verb} nhắc hẹn</i>`);
+          }
+        }
+        return;
+      }
+
+      // ── Pin / unpin topic: mirror into the TG topic (read-only) ───────────
+      if (type === 'new_pin_topic' || type === 'update_pin_topic' || type === 'unpin_topic') {
+        const pinTopic = (data as { topic?: unknown } | undefined)?.topic as
+          { type?: unknown; params?: unknown; id?: unknown; creatorId?: unknown } | undefined;
+        const pinItem = extractBoardMirror(pinTopic);
+        if (pinItem) {
+          const dedupeKey = boardMirrorDedupeKey([groupId, type, pinItem.kind, pinItem.id, pinItem.title]);
+          if (!boardMirrorSeen(dedupeKey)) {
+            const rawActor = (data as { actorId?: unknown } | undefined)?.actorId;
+            const actorId = typeof rawActor === 'string' ? rawActor.trim() : '';
+            await mirrorBoardItemToTopic(api, groupId, buildBoardMirrorText(pinItem, {
+              actorName: actorId,
+              removed: type === 'unpin_topic',
+            }));
+          }
+        } else {
+          const dedupeKey = boardMirrorDedupeKey([groupId, type, String((pinTopic as { id?: unknown } | undefined)?.id ?? '')]);
+          if (!boardMirrorSeen(dedupeKey)) {
+            const verb = type === 'unpin_topic' ? 'đã gỡ ghim' : 'đã ghim';
+            await mirrorBoardItemToTopic(api, groupId, `<i>📌 Một nội dung ${verb} trên Zalo</i>`);
           }
         }
         return;
