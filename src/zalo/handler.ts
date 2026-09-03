@@ -26,6 +26,7 @@ import {
   buildReminderMirrorText,
   extractBoardMirror,
   extractReminderMirror,
+  parseBoardParams,
 } from './boardMirror.js';
 
 // Proxy that routes every tg.* call through the rate-limit queue
@@ -2288,10 +2289,13 @@ ${html}`
 
       // ── Poll vote: UPDATE_BOARD with BoardType.Poll ────────────────────────
       if (type === 'update_board' || type === 'remove_board') {
-        // groupTopic.params is a JSON string containing poll info
-        const rawParams = data?.groupTopic?.params ?? data?.topic?.params ?? '';
-        let params: { boardType?: number; pollId?: number } = {};
-        try { params = JSON.parse(rawParams); } catch { /* ignore */ }
+        // groupTopic.params may be a JSON string OR an already-parsed object
+        // (zca-js types it as object, but the wire payload is often a string).
+        const parsedParams = parseBoardParams(data?.groupTopic?.params ?? data?.topic?.params ?? '');
+        const params: { boardType?: number; pollId?: number } = {
+          boardType: typeof parsedParams?.boardType === 'number' ? parsedParams.boardType : undefined,
+          pollId: typeof parsedParams?.pollId === 'number' ? parsedParams.pollId : undefined,
+        };
         // BoardType.Poll = 3
         if (params.boardType === 3 && params.pollId) {
           const pollId = params.pollId;
