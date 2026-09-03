@@ -2270,6 +2270,8 @@ ${html}`
       const data    = event?.data;
       const groupId = String(event?.threadId ?? data?.groupId ?? '');
       if (!groupId) return;
+      // DEBUG (pin mirror): log every group_event type until pin flow is verified.
+      console.log(`[ZaloHandler] group_event type=${type} act=${event?.act} group=${groupId}`);
       if (isIgnoredZaloGroup(groupId)) return;
 
       // ── Join request: someone wants to join the group ─────────────────────
