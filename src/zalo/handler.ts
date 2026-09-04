@@ -362,38 +362,10 @@ async function mirrorBoardItemToTopic(api: ZaloAPI, groupId: string, html: strin
   }
 }
 
-// Zalo pin-topic id → Telegram mirror message_id, so unpin_topic on Zalo can
-// unpin the matching Telegram message. In-memory only: pins created before a
-// restart simply keep their notification message without auto-unpin.
-const _zaloPinToTgMsg = new Map<string, number>();
-
-/** Pin the mirror message for a Zalo pin event; records the mapping for later unpin. */
-async function pinBoardMirrorMessage(groupId: string, zaloPinId: string, tgMsgId: number): Promise<void> {
-  try {
-    await tg.pinChatMessage(config.telegram.groupId, tgMsgId, { disable_notification: true });
-    if (zaloPinId) _zaloPinToTgMsg.set(`${groupId}|${zaloPinId}`, tgMsgId);
-    console.log(`[ZaloHandler] Pinned board mirror group=${groupId} pinId=${zaloPinId} tgMsgId=${tgMsgId}`);
-  } catch (err) {
-    console.warn(`[ZaloHandler] Failed to pin board mirror group=${groupId}:`, err instanceof Error ? err.message : err);
-  }
-}
-
-/** Unpin the Telegram mirror message matching a Zalo unpin event. */
-async function unpinBoardMirrorMessage(groupId: string, zaloPinId: string): Promise<void> {
-  const key = `${groupId}|${zaloPinId}`;
-  const tgMsgId = _zaloPinToTgMsg.get(key);
-  if (tgMsgId === undefined) {
-    console.log(`[ZaloHandler] Unpin: no TG mapping for group=${groupId} pinId=${zaloPinId} (pre-restart pin?)`);
-    return;
-  }
-  try {
-    await tg.unpinChatMessage(config.telegram.groupId, tgMsgId);
-    _zaloPinToTgMsg.delete(key);
-    console.log(`[ZaloHandler] Unpinned board mirror group=${groupId} pinId=${zaloPinId} tgMsgId=${tgMsgId}`);
-  } catch (err) {
-    console.warn(`[ZaloHandler] Failed to unpin board mirror group=${groupId}:`, err instanceof Error ? err.message : err);
-  }
-}
+// NOTE on Zalo pins: the web listener never emits new_pin_topic for in-app
+// pins (verified Sep 2026), so there is nothing faithful to mirror. If a
+// future zca-js version delivers pin events, re-add pin follow here using
+// tg.pinChatMessage / tg.unpinChatMessage on the mirror message.
 
 // In-flight topic creation promises — prevents duplicate topic creation when
 // many messages arrive concurrently for the same conversation (e.g. 20-photo album).
@@ -2270,8 +2242,6 @@ ${html}`
       const data    = event?.data;
       const groupId = String(event?.threadId ?? data?.groupId ?? '');
       if (!groupId) return;
-      // DEBUG (pin mirror): log every group_event type until pin flow is verified.
-      console.log(`[ZaloHandler] group_event type=${type} act=${event?.act} group=${groupId}`);
       if (isIgnoredZaloGroup(groupId)) return;
 
       // ── Join request: someone wants to join the group ─────────────────────
@@ -2385,7 +2355,9 @@ ${html}`
           const boardTopic = (data?.groupTopic ?? data?.topic) as
             { type?: unknown; params?: unknown; id?: unknown; creatorId?: unknown } | undefined;
           const boardItem = extractBoardMirror(boardTopic);
-          if (boardItem) {
+          // Only notes are mirrored. Pin events are dropped: Zalo does not
+          // deliver usable pin events to the web listener.
+          if (boardItem && boardItem.kind === 'note') {
             const editStamp = (boardTopic as { editTime?: unknown } | undefined)?.editTime ??
               (boardTopic as { createTime?: unknown } | undefined)?.createTime ?? '';
             const dedupeKey = boardMirrorDedupeKey([groupId, type, boardItem.kind, boardItem.id, String(editStamp)]);
@@ -2431,45 +2403,12 @@ ${html}`
         return;
       }
 
-      // ── Pin / unpin topic: mirror into the TG topic (read-only) ───────────
-      // Zalo only pins on explicit pin events — notes/reminders are NOT pins.
-      // Follow Zalo exactly: pin the TG mirror on pin events, unpin on unpin.
-      if (type === 'new_pin_topic' || type === 'update_pin_topic' || type === 'unpin_topic') {
-        const pinTopic = (data as { topic?: unknown } | undefined)?.topic as
-          { type?: unknown; params?: unknown; id?: unknown; creatorId?: unknown } | undefined;
-        const pinId = typeof pinTopic?.id === 'string' ? pinTopic.id.trim() : '';
-        if (type === 'unpin_topic') {
-          const dedupeKey = boardMirrorDedupeKey([groupId, type, pinId]);
-          if (!boardMirrorSeen(dedupeKey) && pinId) {
-            await unpinBoardMirrorMessage(groupId, pinId);
-          }
-          return;
-        }
-        const pinItem = extractBoardMirror(pinTopic);
-        if (pinItem) {
-          const dedupeKey = boardMirrorDedupeKey([groupId, type, pinItem.kind, pinItem.id || pinId, pinItem.title]);
-          if (!boardMirrorSeen(dedupeKey)) {
-            const rawActor = (data as { actorId?: unknown } | undefined)?.actorId;
-            const actorId = typeof rawActor === 'string' ? rawActor.trim() : '';
-            const sentId = await mirrorBoardItemToTopic(api, groupId, buildBoardMirrorText(pinItem, {
-              actorName: actorId,
-              removed: false,
-            }));
-            if (sentId !== undefined) {
-              await pinBoardMirrorMessage(groupId, pinItem.id || pinId, sentId);
-            }
-          }
-        } else {
-          const dedupeKey = boardMirrorDedupeKey([groupId, type, pinId]);
-          if (!boardMirrorSeen(dedupeKey)) {
-            const sentId = await mirrorBoardItemToTopic(api, groupId, `<i>📌 Một nội dung đã ghim trên Zalo</i>`);
-            if (sentId !== undefined) {
-              await pinBoardMirrorMessage(groupId, pinId, sentId);
-            }
-          }
-        }
-        return;
-      }
+      // ── Pin / unpin topic: dropped ───────────────────────────────────────
+      // Zalo does not deliver usable pin events to the web listener
+      // (verified: pinning in the app produces no new_pin_topic event),
+      // so there is nothing faithful to mirror. Fall through to the
+      // join/leave filter below, which ignores these types.
+
 
       // ── Group name change: update TG topic name ────────────────────────────────────────
       // Zalo sends act="update" (type="update") when group is renamed, with groupName in data.
