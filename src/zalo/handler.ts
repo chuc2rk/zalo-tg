@@ -1121,7 +1121,7 @@ ${html}`
       const senderHeaderHtml = groupCaption(bridgeSenderName, senderUid);
       const prependSenderHeader = (bodyHtml?: string): string => withDmMention(
         bodyHtml
-          ? `${senderHeaderHtml}\n${bodyHtml}`
+          ? `${senderHeaderHtml}\n\n${bodyHtml}`
           : senderHeaderHtml,
       );
       const caption = prependSenderHeader();

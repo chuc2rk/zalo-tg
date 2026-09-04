@@ -149,7 +149,7 @@ function senderHeader(senderName: string, stableKey?: string): string {
  *   content…
  */
 export function formatGroupMsg(senderName: string, content: string, stableKey?: string): string {
-  return `${senderHeader(senderName, stableKey)}\n${escapeHtml(truncate(content))}`;
+  return `${senderHeader(senderName, stableKey)}\n\n${escapeHtml(truncate(content))}`;
 }
 
 /**
@@ -157,7 +157,7 @@ export function formatGroupMsg(senderName: string, content: string, stableKey?: 
  * have already been wrapped in <b> tags).
  */
 export function formatGroupMsgHtml(senderName: string, bodyHtml: string, stableKey?: string): string {
-  return `${senderHeader(senderName, stableKey)}\n${bodyHtml}`;
+  return `${senderHeader(senderName, stableKey)}\n\n${bodyHtml}`;
 }
 
 /** Sender attribution used as the first line of media captions. */

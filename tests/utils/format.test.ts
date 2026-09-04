@@ -124,7 +124,7 @@ describe('sender scan marker', () => {
 
 describe('formatGroupMsg', () => {
   it('puts a bold sender header first so readers see who wrote it', () => {
-    expect(formatGroupMsg('Alice', 'Hello', 'uid-a')).toMatch(/^👤 \S+ <b>Alice<\/b>\nHello$/u);
+    expect(formatGroupMsg('Alice', 'Hello', 'uid-a')).toMatch(/^👤 \S+ <b>Alice<\/b>\n\nHello$/u);
   });
 
   it('escapes sender name and content', () => {
@@ -142,7 +142,7 @@ describe('formatGroupMsg', () => {
 
 describe('formatGroupMsgHtml', () => {
   it('puts the bold sender header first and keeps the pre-escaped body below', () => {
-    expect(formatGroupMsgHtml('Alice', '<b>Hello</b>', 'uid-a')).toMatch(/^👤 \S+ <b>Alice<\/b>\n<b>Hello<\/b>$/u);
+    expect(formatGroupMsgHtml('Alice', '<b>Hello</b>', 'uid-a')).toMatch(/^👤 \S+ <b>Alice<\/b>\n\n<b>Hello<\/b>$/u);
   });
 });
 
