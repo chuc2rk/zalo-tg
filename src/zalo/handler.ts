@@ -370,7 +370,9 @@ async function mirrorBoardItemToTopic(api: ZaloAPI, groupId: string, html: strin
 // In-flight topic creation promises — prevents duplicate topic creation when
 // many messages arrive concurrently for the same conversation (e.g. 20-photo album).
 const _pendingTopics = new Map<string, Promise<number>>();
-const ZALO_DM_MENTION = process.env.ZALO_DM_MENTION?.trim() || '@chuc2rk';
+const _dmMentionRaw = process.env.ZALO_DM_MENTION;
+// Empty string disables the DM ping entirely; unset keeps the legacy default.
+const ZALO_DM_MENTION = _dmMentionRaw === undefined ? '@chuc2rk' : _dmMentionRaw.trim();
 const _pendingUserNameLookups = new Map<string, Promise<string>>();
 const _deferredNameResolveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const _deferredNameResolveAttempts = new Map<string, number>();
@@ -1110,10 +1112,11 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
       }
       if (silent) tgBase.disable_notification = true;
 
-      // Preserve the old DM notification behavior: any incoming Zalo DM is
-      // forwarded inside its Telegram topic with @chuc2rk prefixed, so Telegram
-      // actually alerts Chức even when the topic/chat is otherwise muted.
-      const shouldMentionDm = type === ThreadType.User && !msg.isSelf;
+      // DM notification behavior: incoming Zalo DMs are forwarded with a
+      // mention prefix so Telegram alerts even when the topic/chat is muted.
+      // Set ZALO_DM_MENTION to empty to disable the ping (topics still notify
+      // normally unless muted).
+      const shouldMentionDm = type === ThreadType.User && !msg.isSelf && ZALO_DM_MENTION !== '';
       const withDmMention = (html: string): string => shouldMentionDm
         ? `${escapeHtml(ZALO_DM_MENTION)}
 ${html}`
