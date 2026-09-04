@@ -1712,21 +1712,39 @@ ${html}`
             return;
           }
 
+          // Telegram limits: question ≤ 255 chars, each option ≤ 100 chars,
+          // at most 10 options. Trim instead of dropping the whole poll.
+          const safeQuestion = question.slice(0, 255).trim() || 'Bình chọn';
+          const safeOptions = options.slice(0, 10).map(o => o.content.slice(0, 100));
+
           const header = type === ThreadType.Group
             ? `${bridgeSenderName} tạo bình chọn`
             : 'Bình chọn mới';
 
-          const tgPollMsg = await tg.sendPoll(
-            config.telegram.groupId,
-            question,
-            options.map(o => o.content),
-            {
-              ...tgBase,
-              is_anonymous:        isAnonymous,
-              allows_multiple_answers: pollDetail?.allow_multi_choices ?? false,
-              question_parse_mode: undefined,
-            } as Parameters<typeof tg.sendPoll>[3],
-          );
+          let tgPollMsg;
+          try {
+            tgPollMsg = await tg.sendPoll(
+              config.telegram.groupId,
+              safeQuestion,
+              safeOptions,
+              {
+                ...tgBase,
+                is_anonymous:        isAnonymous,
+                allows_multiple_answers: pollDetail?.allow_multi_choices ?? false,
+                question_parse_mode: undefined,
+              } as Parameters<typeof tg.sendPoll>[3],
+            );
+          } catch (pollErr) {
+            // Native poll rejected (limits/empty content) — keep a text record
+            // so the vote never silently disappears from Telegram.
+            console.warn(`[ZaloHandler] Poll ${pollId} sendPoll failed, falling back to text:`, pollErr instanceof Error ? pollErr.message : pollErr);
+            const fallbackBody = `📊 <b>${escapeHtml(question || safeQuestion)}</b>\n` +
+              safeOptions.map(o => `• ${escapeHtml(o)}`).join('\n');
+            const fallbackText = type === ThreadType.Group ? prependSenderHeader(fallbackBody) : fallbackBody;
+            const sent = await tg.sendMessage(config.telegram.groupId, fallbackText, { ...tgBase, parse_mode: 'HTML' });
+            saveTgMapping(sent);
+            return;
+          }
 
           // Send editable score message below
           const scoreText = buildScoreText(header, pollDetail?.options ?? [], pollDetail?.closed ?? false);

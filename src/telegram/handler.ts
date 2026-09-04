@@ -2060,15 +2060,9 @@ export function setupTelegramHandler(
 
   // ── Admin panel ──────────────────────────────────────────────────────────
 
-  // ── /update — manual update check ────────────────────────────────────────
-  tgBot.command('update', async (ctx) => {
-    if (ctx.chat.id !== config.telegram.groupId) return;
-    const { triggerUpdateCheck } = await import('../updater.js');
-    const found = await triggerUpdateCheck(ctx.telegram);
-    if (!found) {
-      await ctx.reply('✅ Bridge đã ở phiên bản mới nhất.', { parse_mode: 'HTML' });
-    }
-  });
+  // NOTE: /update is registered once above (notify-only update check).
+  // Do not add a second tgBot.command('update') — Telegraf runs every
+  // matching handler, so duplicates reply twice to a single command.
 
   /** Reusable back-to-menu markup */
   const adminBackMarkup = () => ({
