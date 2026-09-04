@@ -1763,7 +1763,7 @@ export function setupTelegramHandler(
 
       await ctx.telegram.sendMessage(
         config.telegram.groupId,
-        `👤 <b>${name}</b>\n📱 ${phone}${statusLine ? `\n${statusLine}` : ''}`,
+        `👤 <b>${escapeHtml(name)}</b>\n📱 ${phone}${statusLine ? `\n${statusLine}` : ''}`,
         {
           ...replyOpts,
           parse_mode: 'HTML',
