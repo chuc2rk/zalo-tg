@@ -123,40 +123,36 @@ describe('sender scan marker', () => {
 });
 
 describe('formatGroupMsg', () => {
-  it('visually detaches content from an explicit sender attribution', () => {
-    expect(formatGroupMsg('Alice', 'Hello', 'uid-a')).toMatch(/^Hello\n\n└── 👤 \S+  Alice$/u);
+  it('puts a bold sender header first so readers see who wrote it', () => {
+    expect(formatGroupMsg('Alice', 'Hello', 'uid-a')).toMatch(/^👤 \S+ <b>Alice<\/b>\nHello$/u);
   });
 
   it('escapes sender name and content', () => {
     const result = formatGroupMsg('A < B', 'x & y', 'uid-a');
-    expect(result).toContain('A &lt; B');
-    expect(result).not.toContain('<b>A &lt; B</b>');
+    expect(result).toContain('<b>A &lt; B</b>');
     expect(result).toContain('x &amp; y');
   });
 
   it('truncates long sender names', () => {
     const longName = 'A'.repeat(100);
     const result = formatGroupMsg(longName, 'Hi');
-    const displayedName = result.split(' ').at(-1);
-    expect(displayedName).toBeDefined();
-    expect(displayedName!.length).toBeLessThanOrEqual(65);
+    expect(result).toContain(`<b>${'A'.repeat(63)}…</b>`);
   });
 });
 
 describe('formatGroupMsgHtml', () => {
-  it('keeps pre-escaped body first and puts the detached plain sender below', () => {
-    expect(formatGroupMsgHtml('Alice', '<b>Hello</b>', 'uid-a')).toMatch(/^<b>Hello<\/b>\n\n└── 👤 \S+  Alice$/u);
+  it('puts the bold sender header first and keeps the pre-escaped body below', () => {
+    expect(formatGroupMsgHtml('Alice', '<b>Hello</b>', 'uid-a')).toMatch(/^👤 \S+ <b>Alice<\/b>\n<b>Hello<\/b>$/u);
   });
 });
 
 describe('groupCaption', () => {
-  it('returns an explicit person tag, sender marker, and plain sender name', () => {
-    expect(groupCaption('Alice', 'uid-a')).toMatch(/^└── 👤 \S+  Alice$/u);
+  it('returns a person tag, sender marker, and bold sender name', () => {
+    expect(groupCaption('Alice', 'uid-a')).toMatch(/^👤 \S+ <b>Alice<\/b>$/u);
   });
 
   it('preserves Vietnamese sender-name casing for media captions', () => {
-    expect(groupCaption('Nguyễn Văn A', 'uid-a')).toContain('Nguyễn Văn A');
-    expect(groupCaption('Nguyễn Văn A', 'uid-a')).not.toContain('<b>');
+    expect(groupCaption('Nguyễn Văn A', 'uid-a')).toContain('<b>Nguyễn Văn A</b>');
   });
 });
 

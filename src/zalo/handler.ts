@@ -1118,13 +1118,13 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         ? `${escapeHtml(ZALO_DM_MENTION)}
 ${html}`
         : html;
-      const senderCaption = groupCaption(bridgeSenderName, senderUid);
-      const appendSenderFooter = (bodyHtml?: string): string => withDmMention(
+      const senderHeaderHtml = groupCaption(bridgeSenderName, senderUid);
+      const prependSenderHeader = (bodyHtml?: string): string => withDmMention(
         bodyHtml
-          ? `${bodyHtml}\n\n${senderCaption}`
-          : senderCaption,
+          ? `${senderHeaderHtml}\n${bodyHtml}`
+          : senderHeaderHtml,
       );
-      const caption = appendSenderFooter();
+      const caption = prependSenderHeader();
       const tgOpts  = { ...tgBase, parse_mode: 'HTML' as const, caption };
 
       // Build quote data + mapping helper — saved after every successful TG send
@@ -1284,8 +1284,8 @@ ${html}`
                     ...buf.tgBase,
                     parse_mode: 'HTML' as const,
                     caption: item.caption
-                      ? appendSenderFooter(escapeHtml(item.caption))
-                      : appendSenderFooter(),
+                      ? prependSenderHeader(escapeHtml(item.caption))
+                      : prependSenderHeader(),
                   },
                 );
                 // Use the item's quote which already has the correct cliMsgId and
@@ -1310,8 +1310,8 @@ ${html}`
                 localPaths.push(...downloadedItems.map(item => item.localPath));
                 const albumCaption = downloadedItems.find(item => item.item.caption)?.item.caption;
                 const captionText = albumCaption
-                  ? appendSenderFooter(escapeHtml(albumCaption))
-                  : appendSenderFooter();
+                  ? prependSenderHeader(escapeHtml(albumCaption))
+                  : prependSenderHeader();
                 // Telegram limits media groups to 10 items — split into batches
                 const BATCH = 10;
                 for (let i = 0; i < downloadedItems.length; i += BATCH) {
@@ -1473,7 +1473,7 @@ ${html}`
                 { source: stream, filename: `zalo_sticker_${stickerId}.gif` },
                 {
                   ...tgBase,
-                  caption: appendSenderFooter('<i>(sticker động)</i>'),
+                  caption: prependSenderHeader('<i>(sticker động)</i>'),
                   parse_mode: 'HTML',
                 },
               );
@@ -1543,7 +1543,7 @@ ${html}`
           console.warn('[ZaloHandler] Link: no URL found in content:', JSON.stringify(rawMedia));
           return;
         }
-        const linkText  = appendSenderFooter(safeTelegramLinkHtml(href, title));
+        const linkText  = prependSenderHeader(safeTelegramLinkHtml(href, title));
         const sent = await tg.sendMessage(config.telegram.groupId, linkText, {
           ...tgBase,
           parse_mode: 'HTML',
@@ -1575,7 +1575,7 @@ ${html}`
                 if (info.bankName)      caption += `\nNgân hàng: <b>${escapeHtml(info.bankName)}</b>`;
                 if (info.accountNumber) caption += `\nSTK: <code>${escapeHtml(info.accountNumber)}</code>`;
                 if (info.holderName)    caption += `\nChủ TK: <b>${escapeHtml(info.holderName)}</b>`;
-                const fullCaption = appendSenderFooter(caption);
+                const fullCaption = prependSenderHeader(caption);
                 const sent = await tg.sendPhoto(
                   config.telegram.groupId,
                   { source: qrBuf },
@@ -1613,7 +1613,7 @@ ${html}`
         };
         const icon = ACTION_ICONS[media.action ?? ''] ?? '📋';
         const body = `${icon} ${label}`;
-        const text = appendSenderFooter(body);
+        const text = prependSenderHeader(body);
         const sent = await tg.sendMessage(config.telegram.groupId, text, {
           ...tgBase,
           parse_mode: 'HTML',
@@ -1644,7 +1644,7 @@ ${html}`
           // Map it too, so Telegram replies to the caption can still quote the Zalo location.
           const captionSent = await tg.sendMessage(
             config.telegram.groupId,
-            appendSenderFooter('📍 Vị trí'),
+            prependSenderHeader('📍 Vị trí'),
             { ...tgBase, parse_mode: 'HTML' },
           );
           saveTgMapping(sent);
@@ -1653,7 +1653,7 @@ ${html}`
           // Fallback: Google Maps link
           const mapsUrl = media.href || '#';
           const body    = `📍 <a href="${mapsUrl}">Vị trí</a>`;
-          const text    = appendSenderFooter(body);
+          const text    = prependSenderHeader(body);
           const sent    = await tg.sendMessage(config.telegram.groupId, text, { ...tgBase, parse_mode: 'HTML' });
           saveTgMapping(sent);
         }
@@ -1702,7 +1702,7 @@ ${html}`
             // Can't create TG poll with < 2 options, send as text
             const pollBody = `📊 <b>${escapeHtml(question)}</b>\n<i>Cuộc bình chọn mới (${options.length} lựa chọn)</i>`;
             const text = type === ThreadType.Group
-              ? appendSenderFooter(pollBody)
+              ? prependSenderHeader(pollBody)
               : `📊 <b>${escapeHtml(question)}</b>`;
             const sent = await tg.sendMessage(config.telegram.groupId, text, { ...tgBase, parse_mode: 'HTML' });
             saveTgMapping(sent);
@@ -1817,7 +1817,7 @@ ${html}`
               : media.qrCodeUrl;
 
           const body = `👤 <b>Danh thiếp</b>\nTên: <b>${escapeHtml(contactName)}</b>\nZalo ID: <code>${uid}</code>`;
-          const fullText = type === ThreadType.Group ? appendSenderFooter(body) : withDmMention(body);
+          const fullText = type === ThreadType.Group ? prependSenderHeader(body) : withDmMention(body);
 
           if (qrUrl) {
             // Send QR code image + caption
@@ -1859,7 +1859,7 @@ ${html}`
         if (ecardNotify) lines.push(`<i>${escapeHtml(ecardNotify)}</i>`);
         const ecardBody = lines.join('\n');
         const ecardCaption = type === ThreadType.Group
-          ? appendSenderFooter(ecardBody)
+          ? prependSenderHeader(ecardBody)
           : withDmMention(ecardBody);
 
         const imgUrl = media.href;
@@ -1968,7 +1968,7 @@ ${html}`
 
       console.log(`[ZaloHandler] Unhandled msgType="${msgType}" content:`, JSON.stringify(msg.data.content));
       const fallback = type === ThreadType.Group
-        ? appendSenderFooter(`<i>[${msgType}]</i>`)
+        ? prependSenderHeader(`<i>[${msgType}]</i>`)
         : withDmMention(`<i>[${msgType}]</i>`);
       const sentFallback = await tg.sendMessage(config.telegram.groupId, fallback, {
         ...tgBase,

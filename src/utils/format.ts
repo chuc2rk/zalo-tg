@@ -132,10 +132,38 @@ export function applyZaloMarkupHtml(
 
 const SENDER_BADGES = ['🟦', '🟩', '🟪', '🟧', '🟥', '🟨', '🔵', '🟢', '🟣', '🟠', '🔴', '🟡', '🔷', '🔶', '🔹', '🔸', '⬛', '⬜', '🟤'] as const;
 const SENDER_ACCENTS = ['▌', '●', '◆', '■', '▲', '✦', '✚', '⬢'] as const;
-// Keep attribution visually detached from the message body. All bridged
-// messages share one Telegram bot avatar, so a blank line + explicit person
-// icon is easier to scan than a compact footer stuck directly to the content.
-const SENDER_FOOTER_PREFIX = '└── 👤 ';
+// Sender attribution goes on TOP of the message body in bold so readers see
+// who wrote it without scrolling. All bridged messages share one Telegram
+// bot avatar, so a bold name header is easier to scan than a footer stuck at
+// the bottom of long messages and heavy file captions.
+const SENDER_HEADER_ICON = '👤';
+
+function senderHeader(senderName: string, stableKey?: string): string {
+  const displayName = truncate(senderName, 64);
+  return `${SENDER_HEADER_ICON} ${escapeHtml(senderMarker(senderName, stableKey))} <b>${escapeHtml(displayName)}</b>`;
+}
+
+/**
+ * Format a group message with the sender first in bold, then the content:
+ *   👤 🟪◆  <b>SenderName</b>
+ *   content…
+ */
+export function formatGroupMsg(senderName: string, content: string, stableKey?: string): string {
+  return `${senderHeader(senderName, stableKey)}\n${escapeHtml(truncate(content))}`;
+}
+
+/**
+ * Format a group message with pre-escaped HTML body (e.g. when mention spans
+ * have already been wrapped in <b> tags).
+ */
+export function formatGroupMsgHtml(senderName: string, bodyHtml: string, stableKey?: string): string {
+  return `${senderHeader(senderName, stableKey)}\n${bodyHtml}`;
+}
+
+/** Sender attribution used as the first line of media captions. */
+export function groupCaption(senderName: string, stableKey?: string): string {
+  return senderHeader(senderName, stableKey);
+}
 
 function stableHash(text: string): number {
   let hash = 2166136261;
@@ -174,34 +202,6 @@ export function senderMarker(senderName: string, stableKey = senderName): string
 
 export function senderLabel(senderName: string, stableKey?: string): string {
   return `${senderMarker(senderName, stableKey)} ${truncate(senderName, 64)}`;
-}
-
-function senderHeader(senderName: string, stableKey?: string): string {
-  const displayName = truncate(senderName, 64);
-  return `${SENDER_FOOTER_PREFIX}${escapeHtml(senderMarker(senderName, stableKey))}  ${escapeHtml(displayName)}`;
-}
-
-/**
- * Format a group message with the content first and a detached sender tag:
- *   content…
- *
- *   └── 👤 🟪◆  SenderName
- */
-export function formatGroupMsg(senderName: string, content: string, stableKey?: string): string {
-  return `${escapeHtml(truncate(content))}\n\n${senderHeader(senderName, stableKey)}`;
-}
-
-/**
- * Format a group message with pre-escaped HTML body (e.g. when mention spans
- * have already been wrapped in <b> tags).
- */
-export function formatGroupMsgHtml(senderName: string, bodyHtml: string, stableKey?: string): string {
-  return `${bodyHtml}\n\n${senderHeader(senderName, stableKey)}`;
-}
-
-/** Sender attribution used as the final line of media captions. */
-export function groupCaption(senderName: string, stableKey?: string): string {
-  return senderHeader(senderName, stableKey);
 }
 
 /**
