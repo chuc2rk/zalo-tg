@@ -111,6 +111,7 @@ export const __test_isSenderOnlyForwardCaption = isSenderOnlyForwardCaption;
 export const __test_stripBridgeForwardedTextHeader = stripBridgeForwardedTextHeader;
 export const __test_isExplicitTelegramForward = isExplicitTelegramForward;
 export const __test_getExplicitReplyTarget = getExplicitReplyTarget;
+export { isTimeoutError as __test_isTimeoutError, attachmentTimeoutMs as __test_attachmentTimeoutMs } from '../utils/sendTimeout.js';
 
 function splitLongText(text: string): string[] {
   if (text.length <= MAX_ZALO_TEXT_LENGTH) return [text];
@@ -155,6 +156,7 @@ import { invalidateAppSession, appGetReceivedFriendRequests, appGetSentFriendReq
 import { resetMemberCacheLoaded } from '../zalo/handler.js';
 import { escapeHtml } from '../utils/format.js';
 import { triggerUpdateCheck } from '../updater.js';
+import { ZALO_SEND_TIMEOUT_MS, attachmentTimeoutMs, isTimeoutError } from '../utils/sendTimeout.js';
 
 // Bridge start time (module load = process start)
 const _bridgeStartTime = Date.now();
@@ -2897,8 +2899,6 @@ export function setupTelegramHandler(
         return code === 114 || /quote type is not available|quote.*not available|invalid quote/i.test(errMsg);
       };
 
-      const ZALO_SEND_TIMEOUT_MS = 90_000;
-      const ZALO_ATTACHMENT_TIMEOUT_MAX_MS = 30 * 60_000;
       const withZaloTimeout = async <T>(
         task: () => Promise<T>,
         label: string,
@@ -2917,14 +2917,6 @@ export function setupTelegramHandler(
         }
       };
 
-      const attachmentTimeoutMs = (fileSize?: number): number => {
-        if (!fileSize || fileSize <= 0) return ZALO_SEND_TIMEOUT_MS;
-        const sizeMb = fileSize / 1024 / 1024;
-        // Keep normal sends protected by the 90s guard, but allow very large
-        // files enough time to upload to Zalo. Example: 800 MB gets ~27 minutes.
-        return Math.min(ZALO_ATTACHMENT_TIMEOUT_MAX_MS, Math.max(ZALO_SEND_TIMEOUT_MS, ZALO_SEND_TIMEOUT_MS + sizeMb * 2_000));
-      };
-
       // Helper: send TG error notification back to the same topic
       const notifyError = async (action: string, err: unknown) => {
         const errMsg = err instanceof Error ? err.message : String(err);
@@ -2939,6 +2931,10 @@ export function setupTelegramHandler(
             : '\n💡 <i>Zalo từ chối tham số (code 114).</i>';
         } else if (code === -216) {
           hint = '\n💡 <i>Phiên đăng nhập Zalo hết hạn. Dùng /login để đăng nhập lại.</i>';
+        } else if (isTimeoutError(err)) {
+          // The Zalo call may still complete late on the server — warn the
+          // user not to resend immediately, or the file lands twice.
+          hint = '\n💡 <i>Zalo có thể vẫn đang xử lý file nặng — chờ vài phút, đừng gửi lại vội kẻo bị trùng.</i>';
         }
 
         await tgBot.telegram
@@ -3345,6 +3341,10 @@ export function setupTelegramHandler(
           if (localPaths.length === 0) return;
           sentMsgStore.markSending(meta.zaloId);
           try {
+            // Scale the guard by TOTAL album size — a fixed 90s timeout makes
+            // heavy albums falsely fail while Zalo still delivers them late,
+            // producing ghost duplicates on both sides.
+            const totalBytes = items.reduce((sum, item) => sum + (item.fileSize ?? 0), 0);
             const sendResult = await withZaloTimeout(
               () => api.sendMessage(
                 {
@@ -3357,6 +3357,7 @@ export function setupTelegramHandler(
                 meta.threadType === 1 ? ThreadType.Group : ThreadType.User,
               ) as Promise<{ message?: { msgId?: number } | null; attachment?: Array<{ msgId?: number }> }>,
               `sendMediaGroup(${localPaths.length} files)`,
+              attachmentTimeoutMs(totalBytes),
             );
             const messageMsgId = sendResult?.message?.msgId;
             const attachmentMsgIds = (sendResult?.attachment ?? [])
@@ -3493,6 +3494,7 @@ export function setupTelegramHandler(
           const videoUploads: any[] = await withZaloTimeout(
             () => api.uploadAttachment([localVideoPath], zaloId, threadType),
             `sendVideo(${fname}) uploadAttachment`,
+            attachmentTimeoutMs(vid.file_size),
           );
           const videoUpload = videoUploads?.find((r: { fileType?: string }) => r.fileType === 'video') as
             { fileUrl?: string } | undefined;
@@ -3511,6 +3513,7 @@ export function setupTelegramHandler(
               const thumbUploads: any[] = await withZaloTimeout(
                 () => api.uploadAttachment([localThumbPath!], zaloId, threadType),
                 `sendVideo(${fname}) uploadThumbnail`,
+                attachmentTimeoutMs(vid.file_size),
               );
               const tu = thumbUploads?.[0] as { normalUrl?: string } | undefined;
               if (tu?.normalUrl) thumbUrl = tu.normalUrl;
@@ -3534,6 +3537,7 @@ export function setupTelegramHandler(
                 threadType,
               ),
               `sendVideo(${fname})`,
+              attachmentTimeoutMs(vid.file_size),
             );
             if (result?.msgId !== undefined) {
               sentMsgStore.save(msg.message_id, { msgIds: [result.msgId], zaloId, threadType });
@@ -3555,8 +3559,14 @@ export function setupTelegramHandler(
           }
         } catch (err) {
           console.error('[TG→Zalo] sendVideo failed, fallback to attachment:', err);
-          // Fallback: send as regular file
-          try { await sendAttachment(vid.file_id, fname, vid.file_size, cap, capMentions); } catch { /* ignore */ }
+          if (isTimeoutError(err)) {
+            // Timeout ≠ failure: the video may still land on Zalo late.
+            // Falling back to sendAttachment here would deliver it twice.
+            await notifyError(`sendVideo(${fname})`, err);
+          } else {
+            // Fallback: send as regular file
+            try { await sendAttachment(vid.file_id, fname, vid.file_size, cap, capMentions); } catch { /* ignore */ }
+          }
         } finally {
           await cleanTemp(localVideoPath);
           if (localThumbPath) await cleanTemp(localThumbPath);
@@ -3624,7 +3634,12 @@ export function setupTelegramHandler(
             console.log(`[TG→Zalo] Voice sent OK`);
           } catch (err) {
             console.error('[TG→Zalo] Voice convert/send failed, falling back to file:', err);
-            await sendAttachment(voice.file_id, voiceFilename);
+            if (isTimeoutError(err)) {
+              // Same as video: a timed-out voice may still arrive late.
+              await notifyError(`sendVoice(${voiceFilename})`, err);
+            } else {
+              await sendAttachment(voice.file_id, voiceFilename);
+            }
           } finally {
             await cleanTemp(oggPath);
             if (m4aPath) await cleanTemp(m4aPath);
